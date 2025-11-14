@@ -16,6 +16,14 @@ function oauthClientFromTokens(tokens){
   return o
 }
 
+async function getUserLLMKey(userId){
+  try{
+    const r = await db.query('SELECT llm_key_encrypted, llm_model FROM user_settings WHERE user_id=$1', [userId])
+    if(r.rowCount===0) return null
+    return {key: r.rows[0].llm_key_encrypted.toString(), model: r.rows[0].llm_model}
+  }catch(e){return null}
+}
+
 async function poll(){
   console.log('google poller running')
   const rows = await getIntegrations()
@@ -31,8 +39,11 @@ async function poll(){
           const full = await gmail.users.messages.get({userId:'me', id:m.id, format:'full'})
           const body = extractPlainText(full.data)
           const email = {id:m.id, from: parseFrom(full.data), subject: parseHeader(full.data,'Subject'), snippet: full.data.snippet, body}
+          // get user-specific llm key
+          const userLLM = await getUserLLMKey(row.tenant_id)
+          const opts = userLLM ? {apiKey: userLLM.key, model: userLLM.model} : {}
           // run LLM processor
-          const result = await llmProcessor.processEmail({id:row.tenant_id, preferences:{}}, email)
+          const result = await llmProcessor.processEmail({id:row.tenant_id, preferences:{}}, email, opts)
           const acts = (result && result.actions) || []
           for(const act of acts){
             try{

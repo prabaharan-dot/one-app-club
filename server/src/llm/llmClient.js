@@ -1,16 +1,19 @@
 const fetch = global.fetch || require('node-fetch')
 
-const OPENAI_KEY = process.env.OPENAI_API_KEY
-const MODEL = process.env.OPENAI_MODEL || 'gpt-4o-mini'
+const GLOBAL_OPENAI_KEY = process.env.OPENAI_API_KEY
+const GLOBAL_MODEL = process.env.OPENAI_MODEL || 'gpt-4o-mini'
 
-if (!OPENAI_KEY) {
-  console.warn('OPENAI_API_KEY not set — LLM calls will fail until provided.')
+if (!GLOBAL_OPENAI_KEY) {
+  console.warn('OPENAI_API_KEY not set — LLM calls will fail until provided unless per-user keys are supplied.')
 }
 
 async function chat(messages = [], opts = {}) {
-  if (!OPENAI_KEY) throw new Error('Missing OPENAI_API_KEY')
+  const apiKey = opts.apiKey || GLOBAL_OPENAI_KEY
+  const model = opts.model || GLOBAL_MODEL
+  if (!apiKey) throw new Error('Missing OpenAI API key for LLM call')
+
   const body = {
-    model: MODEL,
+    model,
     messages,
     temperature: opts.temperature ?? 0,
     max_tokens: opts.maxTokens ?? 800,
@@ -20,7 +23,7 @@ async function chat(messages = [], opts = {}) {
   const res = await fetch('https://api.openai.com/v1/chat/completions', {
     method: 'POST',
     headers: {
-      'Authorization': `Bearer ${OPENAI_KEY}`,
+      'Authorization': `Bearer ${apiKey}`,
       'Content-Type': 'application/json'
     },
     body: JSON.stringify(body)

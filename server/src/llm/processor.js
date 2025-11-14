@@ -12,7 +12,7 @@ const llm = require('./llmClient')
    ]
  }
 */
-async function processEmail(user = {}, email = {}) {
+async function processEmail(user = {}, email = {}, opts = {}) {
   const prefs = user.preferences || {}
   const sys = `You are an assistant that decides programmatic actions for incoming emails based on a user's preferences.
 Return a JSON object with an "actions" array. Allowed action types: flag, create_task, create_event, reply, mark_read, set_priority.
@@ -38,7 +38,7 @@ Return strict JSON only.
     const raw = await llm.chat([
       {role: 'system', content: sys},
       {role: 'user', content: userMessage}
-    ], {temperature: 0})
+    ], {temperature: 0, apiKey: opts.apiKey, model: opts.model})
 
     // Safely parse JSON — sometimes LLMs include surrounding text, so extract first JSON blob.
     const jsonText = extractJson(raw)

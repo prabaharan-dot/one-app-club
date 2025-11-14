@@ -147,6 +147,18 @@ CREATE TABLE IF NOT EXISTS audit_logs (
   created_at TIMESTAMPTZ DEFAULT now()
 );
 
+-- User settings (store LLM key pointer / encrypted blob)
+CREATE TABLE IF NOT EXISTS user_settings (
+  id UUID PRIMARY KEY DEFAULT uuid_generate_v4(),
+  user_id UUID NOT NULL REFERENCES users(id) ON DELETE CASCADE,
+  llm_key_encrypted BYTEA,
+  llm_model TEXT,
+  created_at TIMESTAMPTZ DEFAULT now(),
+  updated_at TIMESTAMPTZ DEFAULT now()
+);
+
+CREATE UNIQUE INDEX IF NOT EXISTS idx_user_settings_user ON user_settings(user_id);
+
 -- Safety: only create indexes if they don't exist
 CREATE INDEX IF NOT EXISTS idx_messages_tenant_recv ON messages(tenant_id, received_at DESC);
 CREATE INDEX IF NOT EXISTS idx_messages_thread ON messages(thread_id);
