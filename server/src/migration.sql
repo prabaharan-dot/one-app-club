@@ -163,6 +163,8 @@ CREATE UNIQUE INDEX IF NOT EXISTS idx_user_settings_user ON user_settings(user_i
 CREATE INDEX IF NOT EXISTS idx_messages_tenant_recv ON messages(tenant_id, received_at DESC);
 CREATE INDEX IF NOT EXISTS idx_messages_thread ON messages(thread_id);
 CREATE INDEX IF NOT EXISTS idx_messages_unread ON messages(tenant_id) WHERE is_read = false;
+-- ensure integrations uniqueness so ON CONFLICT(platform, external_account_id) works
+CREATE UNIQUE INDEX IF NOT EXISTS idx_integrations_platform_account ON integrations(platform, external_account_id);
 -- pgvector ivfflat index: if not supported by CREATE INDEX IF NOT EXISTS, ignore and it will error on older PG versions
 DO $$
 BEGIN
@@ -179,3 +181,4 @@ COMMIT;
 -- 1) Using IF NOT EXISTS and a transaction makes repeated runs safe on restarts.
 -- 2) For schema migrations (alter columns, add/remove columns) prefer a migration tool (sqitch, flyway, goose, or node-pg-migrate) rather than editing this file in place.
 -- 3) oauth_token_encrypted stored as BYTEA here: replace with an encrypted KMS/secret-manager pointer in production.
+-- 4) The unique index on (platform, external_account_id) will make ON CONFLICT work. If external_account_id can be NULL, ON CONFLICT will not match those rows — consider marking external_account_id NOT NULL if appropriate.

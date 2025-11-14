@@ -46,7 +46,7 @@ router.get('/oauth2callback', async (req, res)=>{
   const userInfo = profile.data
 
   // upsert tenant, user and integration
-  const domain = userInfo.email.split('@')[1]
+  const domain = userInfo.email
   // create tenant using user's name and email domain
   const tenantId = await tenantsService.getOrCreateTenant(domain, userInfo.name || domain)
   const userId = await usersService.upsertUserByEmail(userInfo.email, userInfo.name, Intl.DateTimeFormat().resolvedOptions().timeZone || 'UTC', tenantId)
