@@ -1,0 +1,169 @@
+BEGIN;
+
+-- Required extensions
+CREATE EXTENSION IF NOT EXISTS "uuid-ossp";
+CREATE EXTENSION IF NOT EXISTS vector; -- pgvector
+
+-- Tenants / Organizations
+CREATE TABLE IF NOT EXISTS tenants (
+  id UUID PRIMARY KEY DEFAULT uuid_generate_v4(),
+  name TEXT NOT NULL,
+  domain TEXT,
+  created_at TIMESTAMPTZ DEFAULT now(),
+  updated_at TIMESTAMPTZ DEFAULT now()
+);
+
+-- Users
+CREATE TABLE IF NOT EXISTS users (
+  id UUID PRIMARY KEY DEFAULT uuid_generate_v4(),
+  tenant_id UUID NOT NULL REFERENCES tenants(id) ON DELETE CASCADE,
+  email TEXT NOT NULL UNIQUE,
+  display_name TEXT,
+  role TEXT DEFAULT 'user', -- user/admin
+  timezone TEXT DEFAULT 'UTC',
+  created_at TIMESTAMPTZ DEFAULT now(),
+  updated_at TIMESTAMPTZ DEFAULT now()
+);
+
+-- Integrations (Outlook, Slack, Teams)
+CREATE TABLE IF NOT EXISTS integrations (
+  id UUID PRIMARY KEY DEFAULT uuid_generate_v4(),
+  tenant_id UUID NOT NULL REFERENCES tenants(id) ON DELETE CASCADE,
+  platform TEXT NOT NULL, -- 'gmail','outlook','slack','teams'
+  external_account_id TEXT, -- e.g., team id, workspace id
+  oauth_token_encrypted BYTEA, -- store encrypted blob / secret manager pointer
+  config JSONB, -- config options, webhook URLs, scopes
+  enabled BOOLEAN DEFAULT true,
+  created_at TIMESTAMPTZ DEFAULT now(),
+  updated_at TIMESTAMPTZ DEFAULT now()
+);
+
+-- Threads across platforms (normalized conversation threads)
+CREATE TABLE IF NOT EXISTS threads (
+  id UUID PRIMARY KEY DEFAULT uuid_generate_v4(),
+  tenant_id UUID NOT NULL REFERENCES tenants(id) ON DELETE CASCADE,
+  external_thread_id TEXT, -- platform-specific thread id
+  title TEXT,
+  channel TEXT, -- channel or mailbox
+  platform TEXT,
+  metadata JSONB, -- e.g., thread participants
+  created_at TIMESTAMPTZ DEFAULT now(),
+  updated_at TIMESTAMPTZ DEFAULT now()
+);
+
+-- Messages (individual messages / emails / chat messages)
+CREATE TABLE IF NOT EXISTS messages (
+  id UUID PRIMARY KEY DEFAULT uuid_generate_v4(),
+  tenant_id UUID NOT NULL REFERENCES tenants(id) ON DELETE CASCADE,
+  thread_id UUID REFERENCES threads(id) ON DELETE SET NULL,
+  platform TEXT NOT NULL, -- 'outlook','slack','teams'
+  external_message_id TEXT, -- platform's message id
+  sender TEXT,
+  recipient JSONB, -- array or object for recipients
+  subject TEXT,
+  body TEXT,
+  body_plain TEXT, -- plaintext for embedding / search
+  attachments JSONB,
+  is_read BOOLEAN DEFAULT false,
+  is_flagged BOOLEAN DEFAULT false,
+  importance TEXT, -- 'low','normal','high'
+  received_at TIMESTAMPTZ,
+  processed_at TIMESTAMPTZ, -- when ingested and summarized
+  metadata JSONB,
+  created_at TIMESTAMPTZ DEFAULT now()
+);
+
+-- Embeddings (for RAG / semantic search) using pgvector
+CREATE TABLE IF NOT EXISTS message_embeddings (
+  id UUID PRIMARY KEY DEFAULT uuid_generate_v4(),
+  message_id UUID NOT NULL REFERENCES messages(id) ON DELETE CASCADE,
+  tenant_id UUID NOT NULL REFERENCES tenants(id) ON DELETE CASCADE,
+  model TEXT,
+  embedding vector(1536), -- adjust dim to model
+  created_at TIMESTAMPTZ DEFAULT now()
+);
+
+-- AI Chat Messages (user <> assistant chat with the UI)
+CREATE TABLE IF NOT EXISTS chat_messages (
+  id UUID PRIMARY KEY DEFAULT uuid_generate_v4(),
+  tenant_id UUID NOT NULL REFERENCES tenants(id),
+  user_id UUID REFERENCES users(id),
+  role TEXT NOT NULL, -- 'user' | 'assistant' | 'system'
+  content TEXT,
+  metadata JSONB,
+  created_at TIMESTAMPTZ DEFAULT now()
+);
+
+-- LLM calls / billing telemetry (optional)
+CREATE TABLE IF NOT EXISTS llm_calls (
+  id UUID PRIMARY KEY DEFAULT uuid_generate_v4(),
+  tenant_id UUID NOT NULL REFERENCES tenants(id),
+  user_id UUID,
+  model TEXT,
+  prompt_tokens INT,
+  completion_tokens INT,
+  total_tokens INT,
+  cost_estimate NUMERIC(12,6),
+  status TEXT,
+  created_at TIMESTAMPTZ DEFAULT now()
+);
+
+-- Notifications / quick counts (cache)
+CREATE TABLE IF NOT EXISTS notification_counters (
+  id UUID PRIMARY KEY DEFAULT uuid_generate_v4(),
+  tenant_id UUID NOT NULL REFERENCES tenants(id),
+  user_id UUID, -- null for tenant-level
+  platform TEXT, -- email/slack/teams
+  unread_count INT DEFAULT 0,
+  updated_at TIMESTAMPTZ DEFAULT now()
+);
+
+-- Calendar / events
+CREATE TABLE IF NOT EXISTS calendar_events (
+  id UUID PRIMARY KEY DEFAULT uuid_generate_v4(),
+  tenant_id UUID NOT NULL REFERENCES tenants(id),
+  external_event_id TEXT,
+  organizer TEXT,
+  attendees JSONB,
+  title TEXT,
+  description TEXT,
+  start_time TIMESTAMPTZ,
+  end_time TIMESTAMPTZ,
+  location TEXT,
+  platform TEXT, -- outlook, google
+  meeting_url TEXT,
+  metadata JSONB,
+  created_at TIMESTAMPTZ DEFAULT now(),
+  updated_at TIMESTAMPTZ DEFAULT now()
+);
+
+-- Audit logs (message actions like read/reply/snooze)
+CREATE TABLE IF NOT EXISTS audit_logs (
+  id UUID PRIMARY KEY DEFAULT uuid_generate_v4(),
+  tenant_id UUID,
+  user_id UUID,
+  action TEXT,
+  payload JSONB,
+  created_at TIMESTAMPTZ DEFAULT now()
+);
+
+-- Safety: only create indexes if they don't exist
+CREATE INDEX IF NOT EXISTS idx_messages_tenant_recv ON messages(tenant_id, received_at DESC);
+CREATE INDEX IF NOT EXISTS idx_messages_thread ON messages(thread_id);
+CREATE INDEX IF NOT EXISTS idx_messages_unread ON messages(tenant_id) WHERE is_read = false;
+-- pgvector ivfflat index: if not supported by CREATE INDEX IF NOT EXISTS, ignore and it will error on older PG versions
+DO $$
+BEGIN
+  IF NOT EXISTS (SELECT 1 FROM pg_class WHERE relname = 'idx_embeddings_vector') THEN
+    EXECUTE 'CREATE INDEX idx_embeddings_vector ON message_embeddings USING ivfflat (embedding) WITH (lists = 100)';
+  END IF;
+END$$;
+
+CREATE INDEX IF NOT EXISTS idx_calendar_tenant_time ON calendar_events(tenant_id, start_time);
+
+COMMIT;
+
+-- Notes:
+-- 1) Using IF NOT EXISTS and a transaction makes repeated runs safe on restarts.
+-- 2) For schema migrations (alter columns, add/remove columns) prefer a migration tool (sqitch, flyway, goose, or node-pg-migrate) rather than editing this file in place.
+-- 3) oauth_token_encrypted stored as BYTEA here: replace with an encrypted KMS/secret-manager pointer in production.

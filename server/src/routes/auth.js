@@ -1,7 +1,9 @@
 const express = require('express')
 const router = express.Router()
 const {google} = require('googleapis')
-const User = require('../models/User')
+const tenantsService = require('../services/tenants')
+const usersService = require('../services/users')
+const integrationsService = require('../services/integrations')
 
 const CLIENT_ID = process.env.GOOGLE_CLIENT_ID
 const CLIENT_SECRET = process.env.GOOGLE_CLIENT_SECRET
@@ -25,6 +27,14 @@ router.get('/url', (req, res) =>{
   res.json({url})
 })
 
+// new signup endpoint to begin google oauth for signup
+router.get('/signup', (req,res)=>{
+  const o = oauthClient()
+  const scopes = ['https://www.googleapis.com/auth/userinfo.email','https://www.googleapis.com/auth/userinfo.profile','https://www.googleapis.com/auth/gmail.readonly']
+  const url = o.generateAuthUrl({access_type:'offline', scope:scopes, prompt:'consent'})
+  res.redirect(url)
+})
+
 router.get('/oauth2callback', async (req, res)=>{
   const code = req.query.code
   if(!code) return res.status(400).send('missing code')
@@ -34,22 +44,24 @@ router.get('/oauth2callback', async (req, res)=>{
   const oauth2 = google.oauth2({auth:o, version:'v2'})
   const profile = await oauth2.userinfo.get()
   const userInfo = profile.data
-  let user = await User.findOne({googleId:userInfo.id})
-  if(!user){
-    user = await User.create({googleId:userInfo.id, email:userInfo.email, name:userInfo.name, avatar:userInfo.picture, tokens})
-  }else{
-    user.tokens = tokens
-    await user.save()
-  }
-  // store user in session
-  req.session.userId = user._id
-  // redirect to client
+
+  // upsert tenant, user and integration
+  const domain = userInfo.email.split('@')[1]
+  // create tenant using user's name and email domain
+  const tenantId = await tenantsService.getOrCreateTenant(domain, userInfo.name || domain)
+  const userId = await usersService.upsertUserByEmail(userInfo.email, userInfo.name, Intl.DateTimeFormat().resolvedOptions().timeZone || 'UTC', tenantId)
+  const tokenBlob = Buffer.from(JSON.stringify(tokens))
+  await integrationsService.upsertIntegration(tenantId, 'gmail', userInfo.id, tokenBlob, {scopes:[]})
+
+  // set session
+  req.session.userId = userId
+  req.session.tenantId = tenantId
   return res.redirect(process.env.CLIENT_ORIGIN || 'http://localhost:5173')
 })
 
 router.get('/me', async (req,res)=>{
   if(!req.session.userId) return res.status(401).json({error:'not_logged_in'})
-  const user = await User.findById(req.session.userId).select('-tokens')
+  const user = await usersService.getUserById(req.session.userId)
   res.json({user})
 })
 

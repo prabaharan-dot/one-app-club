@@ -1,9 +1,11 @@
 require('dotenv').config()
 const express = require('express')
 const cors = require('cors')
-const mongoose = require('mongoose')
 const session = require('express-session')
 const authRoutes = require('./routes/auth')
+const googlePoller = require('./integrations/google/poller')
+const db = require('./db')
+const fs = require('fs')
 
 const app = express()
 app.use(cors({origin:process.env.CLIENT_ORIGIN || 'http://localhost:5173', credentials:true}))
@@ -12,9 +14,22 @@ app.use(session({secret:process.env.SESSION_SECRET || 'secret', resave:false, sa
 
 app.use('/api/auth', authRoutes)
 
-const MONGO = process.env.MONGO_URI || 'mongodb://localhost:27017/oneappclub'
-mongoose.connect(MONGO).then(()=>{
-  console.log('mongo connected')
-  const port = process.env.PORT || 4000
-  app.listen(port, ()=> console.log('server listening', port))
-}).catch(err=>{console.error(err); process.exit(1)})
+async function start(){
+  try{
+    // run migrations if file exists
+    const migration = fs.readFileSync(__dirname + '/migration.sql','utf8')
+    await db.query(migration)
+    console.log('migrations applied')
+
+    const port = process.env.PORT || 4000
+    app.listen(port, ()=>{
+      console.log('server listening', port)
+      googlePoller.start()
+    })
+  }catch(e){
+    console.error('failed to start', e)
+    process.exit(1)
+  }
+}
+
+start()
