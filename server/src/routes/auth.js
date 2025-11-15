@@ -1,7 +1,6 @@
 const express = require('express')
 const router = express.Router()
 const {google} = require('googleapis')
-const tenantsService = require('../services/tenants')
 const usersService = require('../services/users')
 const integrationsService = require('../services/integrations')
 
@@ -45,17 +44,13 @@ router.get('/oauth2callback', async (req, res)=>{
   const profile = await oauth2.userinfo.get()
   const userInfo = profile.data
 
-  // upsert tenant, user and integration
-  const domain = userInfo.email
-  // create tenant using user's name and email domain
-  const tenantId = await tenantsService.getOrCreateTenant(domain, userInfo.name || domain)
-  const userId = await usersService.upsertUserByEmail(userInfo.email, userInfo.name, Intl.DateTimeFormat().resolvedOptions().timeZone || 'UTC', tenantId)
+  // upsert user and integration (user-scoped)
   const tokenBlob = Buffer.from(JSON.stringify(tokens))
-  await integrationsService.upsertIntegration(tenantId, 'gmail', userInfo.id, tokenBlob, {scopes:[]})
+  const userId = await usersService.upsertUserByEmail(userInfo.email, userInfo.name, Intl.DateTimeFormat().resolvedOptions().timeZone || 'UTC')
+  await integrationsService.upsertIntegration(userId, 'gmail', userInfo.id, tokenBlob, {scopes:[]})
 
   // set session
   req.session.userId = userId
-  req.session.tenantId = tenantId
   return res.redirect(process.env.CLIENT_ORIGIN || 'http://localhost:5173')
 })
 

@@ -24,11 +24,27 @@ async function getUserLLMKey(userId){
   }catch(e){return null}
 }
 
+async function upsertMessage(userId, platform, externalId, meta){
+  // insert or update message, return id
+  const q = `INSERT INTO messages (user_id, platform, external_message_id, sender, recipient, subject, body, body_plain, attachments, received_at, metadata, created_at)
+    VALUES ($1,$2,$3,$4,$5,$6,$7,$8,$9,$10,$11,now())
+    ON CONFLICT (platform, external_message_id, user_id) DO UPDATE SET sender=EXCLUDED.sender, recipient=EXCLUDED.recipient, subject=EXCLUDED.subject, body=EXCLUDED.body, body_plain=EXCLUDED.body_plain, attachments=EXCLUDED.attachments, received_at=EXCLUDED.received_at, metadata=EXCLUDED.metadata RETURNING id`;
+  const vals = [userId, platform, externalId, meta.sender, JSON.stringify(meta.recipient||{}), meta.subject, meta.body, meta.body_plain, JSON.stringify(meta.attachments||{}), meta.received_at, JSON.stringify(meta.metadata||{})]
+  const r = await db.query(q, vals)
+  return r.rows[0].id
+}
+
+async function storeActions(messageId, userId, actionsList){
+  await db.query('INSERT INTO message_actions (message_id, user_id, suggested_actions, created_at, acted) VALUES ($1,$2,$3,now(),false)', [messageId, userId, JSON.stringify(actionsList)])
+  await db.query('UPDATE messages SET action_required=true, action_suggested=$1 WHERE id=$2', [JSON.stringify(actionsList), messageId])
+}
+
 async function poll(){
   console.log('google poller running')
   const rows = await getIntegrations()
   for(const row of rows){
     try{
+      console.log(row)
       const o = oauthClientFromTokens(row.oauth_token_encrypted.toString())
       const gmail = google.gmail({version:'v1', auth:o})
       // list recent messages
@@ -39,35 +55,20 @@ async function poll(){
           const full = await gmail.users.messages.get({userId:'me', id:m.id, format:'full'})
           const body = extractPlainText(full.data)
           const email = {id:m.id, from: parseFrom(full.data), subject: parseHeader(full.data,'Subject'), snippet: full.data.snippet, body}
+
+          // save message to DB
+          const msgId = await upsertMessage(row.user_id, 'gmail', m.id, {sender: email.from, recipient: null, subject: email.subject, body: full.data.snippet, body_plain: body, attachments: null, received_at: new Date().toISOString(), metadata: {}})
+
           // get user-specific llm key
-          const userLLM = await getUserLLMKey(row.tenant_id)
+          const userLLM = await getUserLLMKey(row.user_id)
           const opts = userLLM ? {apiKey: userLLM.key, model: userLLM.model} : {}
-          // run LLM processor
-          const result = await llmProcessor.processEmail({id:row.tenant_id, preferences:{}}, email, opts)
+          // run LLM processor to get suggested actions
+          const result = await llmProcessor.processEmail({id:row.user_id, preferences:{}}, email, opts)
           const acts = (result && result.actions) || []
-          for(const act of acts){
-            try{
-              switch(act.type){
-                case 'flag':
-                  await actions.modifyMessage(o, m.id, act)
-                  break
-                case 'create_task':
-                  await actions.createTask(o, {title:act.title, notes:act.notes})
-                  break
-                case 'create_event':
-                  await actions.createCalendarEvent(o, {summary: act.title, description: act.notes, start: {dateTime:act.start}, end:{dateTime:act.end}})
-                  break
-                case 'reply':
-                  if(act.send) await actions.sendGmail(o, makeRawReply(full.data, act.body))
-                  break
-                case 'mark_read':
-                  await actions.modifyMessage(o, m.id, {removeLabelIds:['UNREAD']})
-                  break
-                default:
-                  console.log('unknown act', act)
-              }
-            }catch(e){ console.error('action fail', e.message || e) }
+          if(acts.length>0){
+            await storeActions(msgId, row.user_id, acts)
           }
+
         }catch(e){ console.error('message fetch fail', e.message || e) }
       }
     }catch(e){ console.error('poll row fail', e.message || e) }

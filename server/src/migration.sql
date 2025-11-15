@@ -4,19 +4,9 @@ BEGIN;
 CREATE EXTENSION IF NOT EXISTS "uuid-ossp";
 CREATE EXTENSION IF NOT EXISTS vector; -- pgvector
 
--- Tenants / Organizations
-CREATE TABLE IF NOT EXISTS tenants (
-  id UUID PRIMARY KEY DEFAULT uuid_generate_v4(),
-  name TEXT NOT NULL,
-  domain TEXT,
-  created_at TIMESTAMPTZ DEFAULT now(),
-  updated_at TIMESTAMPTZ DEFAULT now()
-);
-
--- Users
+-- Users (top-level, single-tenant per user model)
 CREATE TABLE IF NOT EXISTS users (
   id UUID PRIMARY KEY DEFAULT uuid_generate_v4(),
-  tenant_id UUID NOT NULL REFERENCES tenants(id) ON DELETE CASCADE,
   email TEXT NOT NULL UNIQUE,
   display_name TEXT,
   role TEXT DEFAULT 'user', -- user/admin
@@ -25,10 +15,10 @@ CREATE TABLE IF NOT EXISTS users (
   updated_at TIMESTAMPTZ DEFAULT now()
 );
 
--- Integrations (Outlook, Slack, Teams)
+-- Integrations (per-user: Gmail, Outlook, Slack, Teams)
 CREATE TABLE IF NOT EXISTS integrations (
   id UUID PRIMARY KEY DEFAULT uuid_generate_v4(),
-  tenant_id UUID NOT NULL REFERENCES tenants(id) ON DELETE CASCADE,
+  user_id UUID NOT NULL REFERENCES users(id) ON DELETE CASCADE,
   platform TEXT NOT NULL, -- 'gmail','outlook','slack','teams'
   external_account_id TEXT, -- e.g., team id, workspace id
   oauth_token_encrypted BYTEA, -- store encrypted blob / secret manager pointer
@@ -41,7 +31,7 @@ CREATE TABLE IF NOT EXISTS integrations (
 -- Threads across platforms (normalized conversation threads)
 CREATE TABLE IF NOT EXISTS threads (
   id UUID PRIMARY KEY DEFAULT uuid_generate_v4(),
-  tenant_id UUID NOT NULL REFERENCES tenants(id) ON DELETE CASCADE,
+  user_id UUID NOT NULL REFERENCES users(id) ON DELETE CASCADE,
   external_thread_id TEXT, -- platform-specific thread id
   title TEXT,
   channel TEXT, -- channel or mailbox
@@ -54,9 +44,9 @@ CREATE TABLE IF NOT EXISTS threads (
 -- Messages (individual messages / emails / chat messages)
 CREATE TABLE IF NOT EXISTS messages (
   id UUID PRIMARY KEY DEFAULT uuid_generate_v4(),
-  tenant_id UUID NOT NULL REFERENCES tenants(id) ON DELETE CASCADE,
+  user_id UUID NOT NULL REFERENCES users(id) ON DELETE CASCADE,
   thread_id UUID REFERENCES threads(id) ON DELETE SET NULL,
-  platform TEXT NOT NULL, -- 'outlook','slack','teams'
+  platform TEXT NOT NULL, -- 'outlook','slack','teams','gmail'
   external_message_id TEXT, -- platform's message id
   sender TEXT,
   recipient JSONB, -- array or object for recipients
@@ -73,11 +63,37 @@ CREATE TABLE IF NOT EXISTS messages (
   created_at TIMESTAMPTZ DEFAULT now()
 );
 
+-- Ensure unique index for platform + external_message_id + user_id for upserts
+DO $$
+BEGIN
+  IF NOT EXISTS (SELECT 1 FROM pg_class WHERE relname = 'idx_messages_platform_external') THEN
+    EXECUTE 'CREATE UNIQUE INDEX idx_messages_platform_external ON messages(platform, external_message_id, user_id)';
+  END IF;
+END$$;
+
+-- Add action-tracking columns to messages if missing
+ALTER TABLE messages ADD COLUMN IF NOT EXISTS action_required BOOLEAN DEFAULT false;
+ALTER TABLE messages ADD COLUMN IF NOT EXISTS action_suggested JSONB;
+ALTER TABLE messages ADD COLUMN IF NOT EXISTS actioned BOOLEAN DEFAULT false;
+
+-- Message actions table to store LLM suggested actions (do not auto-execute)
+CREATE TABLE IF NOT EXISTS message_actions (
+  id UUID PRIMARY KEY DEFAULT uuid_generate_v4(),
+  message_id UUID NOT NULL REFERENCES messages(id) ON DELETE CASCADE,
+  user_id UUID NOT NULL REFERENCES users(id) ON DELETE CASCADE,
+  suggested_actions JSONB,
+  created_at TIMESTAMPTZ DEFAULT now(),
+  acted BOOLEAN DEFAULT false
+);
+
+CREATE INDEX IF NOT EXISTS idx_message_actions_user ON message_actions(user_id);
+CREATE INDEX IF NOT EXISTS idx_messages_action_required ON messages(user_id) WHERE action_required = true;
+
 -- Embeddings (for RAG / semantic search) using pgvector
 CREATE TABLE IF NOT EXISTS message_embeddings (
   id UUID PRIMARY KEY DEFAULT uuid_generate_v4(),
   message_id UUID NOT NULL REFERENCES messages(id) ON DELETE CASCADE,
-  tenant_id UUID NOT NULL REFERENCES tenants(id) ON DELETE CASCADE,
+  user_id UUID NOT NULL REFERENCES users(id) ON DELETE CASCADE,
   model TEXT,
   embedding vector(1536), -- adjust dim to model
   created_at TIMESTAMPTZ DEFAULT now()
@@ -86,8 +102,7 @@ CREATE TABLE IF NOT EXISTS message_embeddings (
 -- AI Chat Messages (user <> assistant chat with the UI)
 CREATE TABLE IF NOT EXISTS chat_messages (
   id UUID PRIMARY KEY DEFAULT uuid_generate_v4(),
-  tenant_id UUID NOT NULL REFERENCES tenants(id),
-  user_id UUID REFERENCES users(id),
+  user_id UUID NOT NULL REFERENCES users(id),
   role TEXT NOT NULL, -- 'user' | 'assistant' | 'system'
   content TEXT,
   metadata JSONB,
@@ -97,7 +112,6 @@ CREATE TABLE IF NOT EXISTS chat_messages (
 -- LLM calls / billing telemetry (optional)
 CREATE TABLE IF NOT EXISTS llm_calls (
   id UUID PRIMARY KEY DEFAULT uuid_generate_v4(),
-  tenant_id UUID NOT NULL REFERENCES tenants(id),
   user_id UUID,
   model TEXT,
   prompt_tokens INT,
@@ -111,8 +125,7 @@ CREATE TABLE IF NOT EXISTS llm_calls (
 -- Notifications / quick counts (cache)
 CREATE TABLE IF NOT EXISTS notification_counters (
   id UUID PRIMARY KEY DEFAULT uuid_generate_v4(),
-  tenant_id UUID NOT NULL REFERENCES tenants(id),
-  user_id UUID, -- null for tenant-level
+  user_id UUID, -- null for account-wide
   platform TEXT, -- email/slack/teams
   unread_count INT DEFAULT 0,
   updated_at TIMESTAMPTZ DEFAULT now()
@@ -121,7 +134,7 @@ CREATE TABLE IF NOT EXISTS notification_counters (
 -- Calendar / events
 CREATE TABLE IF NOT EXISTS calendar_events (
   id UUID PRIMARY KEY DEFAULT uuid_generate_v4(),
-  tenant_id UUID NOT NULL REFERENCES tenants(id),
+  user_id UUID NOT NULL REFERENCES users(id) ON DELETE CASCADE,
   external_event_id TEXT,
   organizer TEXT,
   attendees JSONB,
@@ -140,7 +153,6 @@ CREATE TABLE IF NOT EXISTS calendar_events (
 -- Audit logs (message actions like read/reply/snooze)
 CREATE TABLE IF NOT EXISTS audit_logs (
   id UUID PRIMARY KEY DEFAULT uuid_generate_v4(),
-  tenant_id UUID,
   user_id UUID,
   action TEXT,
   payload JSONB,
@@ -160,11 +172,11 @@ CREATE TABLE IF NOT EXISTS user_settings (
 CREATE UNIQUE INDEX IF NOT EXISTS idx_user_settings_user ON user_settings(user_id);
 
 -- Safety: only create indexes if they don't exist
-CREATE INDEX IF NOT EXISTS idx_messages_tenant_recv ON messages(tenant_id, received_at DESC);
+CREATE INDEX IF NOT EXISTS idx_messages_user_recv ON messages(user_id, received_at DESC);
 CREATE INDEX IF NOT EXISTS idx_messages_thread ON messages(thread_id);
-CREATE INDEX IF NOT EXISTS idx_messages_unread ON messages(tenant_id) WHERE is_read = false;
--- ensure integrations uniqueness so ON CONFLICT(platform, external_account_id) works
-CREATE UNIQUE INDEX IF NOT EXISTS idx_integrations_platform_account ON integrations(platform, external_account_id);
+CREATE INDEX IF NOT EXISTS idx_messages_unread ON messages(user_id) WHERE is_read = false;
+-- ensure integrations uniqueness so ON CONFLICT(platform, external_account_id) works per user
+CREATE UNIQUE INDEX IF NOT EXISTS idx_integrations_user_platform_account ON integrations(user_id, platform, external_account_id);
 -- pgvector ivfflat index: if not supported by CREATE INDEX IF NOT EXISTS, ignore and it will error on older PG versions
 DO $$
 BEGIN
@@ -173,7 +185,7 @@ BEGIN
   END IF;
 END$$;
 
-CREATE INDEX IF NOT EXISTS idx_calendar_tenant_time ON calendar_events(tenant_id, start_time);
+CREATE INDEX IF NOT EXISTS idx_calendar_user_time ON calendar_events(user_id, start_time);
 
 COMMIT;
 
@@ -181,4 +193,4 @@ COMMIT;
 -- 1) Using IF NOT EXISTS and a transaction makes repeated runs safe on restarts.
 -- 2) For schema migrations (alter columns, add/remove columns) prefer a migration tool (sqitch, flyway, goose, or node-pg-migrate) rather than editing this file in place.
 -- 3) oauth_token_encrypted stored as BYTEA here: replace with an encrypted KMS/secret-manager pointer in production.
--- 4) The unique index on (platform, external_account_id) will make ON CONFLICT work. If external_account_id can be NULL, ON CONFLICT will not match those rows — consider marking external_account_id NOT NULL if appropriate.
+-- 4) The unique index on (platform, external_account_id, user_id) will make ON CONFLICT work. If external_account_id can be NULL, ON CONFLICT will not match those rows — consider marking external_account_id NOT NULL if appropriate.

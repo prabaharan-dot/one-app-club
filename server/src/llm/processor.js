@@ -45,7 +45,8 @@ Return strict JSON only.
     const parsed = JSON.parse(jsonText)
     return parsed
   } catch (err) {
-    console.error('LLM processing failed', err.message || err)
+    
+    console.error('LLM processing failed', err.message || err,user,opts)
     return { actions: [] }
   }
 }

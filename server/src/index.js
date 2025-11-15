@@ -15,6 +15,7 @@ app.use(session({secret:process.env.SESSION_SECRET || 'secret', resave:false, sa
 
 app.use('/api/auth', authRoutes)
 app.use('/api/settings', settingsRoutes)
+app.use('/api/messages', require('./routes/messages'))
 
 async function start(){
   try{
