@@ -44,7 +44,6 @@ async function poll(){
   const rows = await getIntegrations()
   for(const row of rows){
     try{
-      console.log(row)
       const o = oauthClientFromTokens(row.oauth_token_encrypted.toString())
       const gmail = google.gmail({version:'v1', auth:o})
       // list recent messages

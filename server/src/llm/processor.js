@@ -46,7 +46,7 @@ Return strict JSON only.
     return parsed
   } catch (err) {
     
-    console.error('LLM processing failed', err.message || err,user,opts)
+    console.error('LLM processing failed', err.message || err)
     return { actions: [] }
   }
 }
