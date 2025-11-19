@@ -1,7 +1,7 @@
 const { OpenAI } = require('openai')
 
-const GLOBAL_OPENAI_KEY = process.env.OPENAI_API_KEY
-const GLOBAL_MODEL = process.env.OPENAI_MODEL || 'gpt-5-nano'
+const GLOBAL_OPENAI_KEY = process.env.GLOBAL_OPENAI_KEY
+const GLOBAL_MODEL = process.env.GLOBAL_MODEL || 'gpt-5-nano'
 
 if (!GLOBAL_OPENAI_KEY) {
   console.warn('OPENAI_API_KEY not set — LLM calls will fail until provided unless per-user keys are supplied.')
@@ -18,8 +18,7 @@ async function chat(messages = [], opts = {}) {
   const payload = {
     model,
     messages,
-    temperature: opts.temperature ?? 0,
-    max_tokens: opts.maxTokens ?? 800,
+    max_completion_tokens: opts.maxTokens ?? 800,
     ...opts.extra
   }
 
