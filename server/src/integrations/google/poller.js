@@ -1,7 +1,6 @@
 const {google} = require('googleapis')
 const db = require('../../db')
 const actions = require('./actions')
-const llmProcessor = require('../../llm/processor')
 
 const POLL_INTERVAL = parseInt(process.env.GOOGLE_POLL_INTERVAL || '300000') // 5 minutes
 
@@ -16,13 +15,7 @@ function oauthClientFromTokens(tokens){
   return o
 }
 
-async function getUserLLMKey(userId){
-  try{
-    const r = await db.query('SELECT llm_key_encrypted, llm_model FROM user_settings WHERE user_id=$1', [userId])
-    if(r.rowCount===0) return null
-    return {key: r.rows[0].llm_key_encrypted.toString(), model: r.rows[0].llm_model}
-  }catch(e){return null}
-}
+
 
 async function getLastPollTime(userId){
   try{
@@ -48,10 +41,7 @@ async function upsertMessage(userId, platform, externalId, meta){
   return r.rows[0].id
 }
 
-async function storeActions(messageId, userId, actionsList){
-  await db.query('INSERT INTO message_actions (message_id, user_id, suggested_actions, created_at, acted) VALUES ($1,$2,$3,now(),false)', [messageId, userId, JSON.stringify(actionsList)])
-  await db.query('UPDATE messages SET action_required=true, action_suggested=$1 WHERE id=$2', [JSON.stringify(actionsList), messageId])
-}
+
 
 async function poll(){
   console.log('google poller running')
@@ -76,8 +66,7 @@ async function poll(){
       
       console.log(`Found ${messages.length} messages for user ${row.user_id}`)
       
-      // store all messages first, then process
-      const storedMessages = []
+      // Store messages only - LLM processing happens in separate job
       for(const m of messages){
         try{
           const full = await gmail.users.messages.get({userId:'me', id:m.id, format:'full'})
@@ -85,8 +74,8 @@ async function poll(){
           const receivedDate = parseHeader(full.data, 'Date')
           const receivedAt = receivedDate ? new Date(receivedDate).toISOString() : new Date().toISOString()
           
-          // save message to DB first
-          const msgId = await upsertMessage(row.user_id, 'gmail', m.id, {
+          // Save message to DB - LLM processing job will handle the rest
+          await upsertMessage(row.user_id, 'gmail', m.id, {
             sender: parseFrom(full.data), 
             recipient: null, 
             subject: parseHeader(full.data,'Subject'), 
@@ -96,34 +85,8 @@ async function poll(){
             received_at: receivedAt, 
             metadata: {}
           })
-          
-          storedMessages.push({
-            msgId,
-            email: {
-              id: m.id, 
-              from: parseFrom(full.data), 
-              subject: parseHeader(full.data,'Subject'), 
-              snippet: full.data.snippet, 
-              body
-            }
-          })
 
         }catch(e){ console.error('message fetch fail', e.message || e) }
-      }
-      
-      // now process stored messages for LLM suggestions
-      for(const stored of storedMessages){
-        try{
-          const userLLM = await getUserLLMKey(row.user_id)
-          const opts = userLLM ? {apiKey: userLLM.key, model: userLLM.model} : {}
-          
-          // run LLM processor to get suggested actions
-          const result = await llmProcessor.processEmail({id:row.user_id, preferences:{}}, stored.email, opts)
-          const acts = (result && result.actions) || []
-          if(acts.length>0){
-            await storeActions(stored.msgId, row.user_id, acts)
-          }
-        }catch(e){ console.error('message process fail', e.message || e) }
       }
       
       // update last poll time for this user

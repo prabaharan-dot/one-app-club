@@ -33,9 +33,16 @@ export default function ChatWindow(){
   }
 
   useEffect(()=>{
-    // old showPending replaced with loadPendingMessages; keep event hookup for widget
+    // Event listeners for widget interactions
     window.addEventListener('showPendingMessages', loadPendingMessages)
-    return ()=> window.removeEventListener('showPendingMessages', loadPendingMessages)
+    window.addEventListener('showEmailSummary', handleEmailSummary)
+    window.addEventListener('showDailyBriefing', handleDailyBriefing)
+    
+    return ()=> {
+      window.removeEventListener('showPendingMessages', loadPendingMessages)
+      window.removeEventListener('showEmailSummary', handleEmailSummary)
+      window.removeEventListener('showDailyBriefing', handleDailyBriefing)
+    }
   },[])
 
   // helper to load "important" messages (heuristic filter)
@@ -80,6 +87,66 @@ export default function ChatWindow(){
       setMessages(m=>[...m,{id:Date.now(), from:'ai', text: textSummary}])
     }catch(e){
       setMessages(m=>[...m,{id:Date.now(), from:'ai', text:'Failed to generate a brief.'}])
+    }
+  }
+
+  // Handle email summary from hover menu
+  async function handleEmailSummary(event){
+    const summaryData = event.detail
+    if(!summaryData) return
+    
+    try {
+      setMessages(m=>[...m,{id:Date.now(), from:'ai', text:'Here\'s your email summary for today:'}])
+      await new Promise(r=>setTimeout(r, 400))
+      
+      const summary = `📧 **Email Summary**
+• Total emails: ${summaryData.total_count || 0}
+• Urgent items: ${summaryData.urgent_count || 0}
+• Key senders: ${summaryData.key_senders ? summaryData.key_senders.join(', ') : 'None'}
+• Main themes: ${summaryData.main_themes ? summaryData.main_themes.join(', ') : 'None'}
+
+${summaryData.summary_text || 'No additional insights available.'}`
+
+      setMessages(m=>[...m,{id:Date.now(), from:'ai', text:summary, type:'email_summary', data:summaryData}])
+    } catch(e) {
+      setMessages(m=>[...m,{id:Date.now(), from:'ai', text:'Failed to load email summary.'}])
+    }
+  }
+
+  // Handle daily briefing from hover menu  
+  async function handleDailyBriefing(event){
+    const briefingData = event.detail
+    if(!briefingData) return
+    
+    try {
+      setMessages(m=>[...m,{id:Date.now(), from:'ai', text:briefingData.greeting || 'Good morning! Here\'s your daily briefing:'}])
+      await new Promise(r=>setTimeout(r, 500))
+      
+      // Priority items
+      if(briefingData.priority_items && briefingData.priority_items.length > 0){
+        setMessages(m=>[...m,{id:Date.now(), from:'ai', text:'🎯 **Top Priorities:**\n' + briefingData.priority_items.map((item, idx) => `${idx+1}. ${item}`).join('\n')}])
+        await new Promise(r=>setTimeout(r, 400))
+      }
+      
+      // Email overview
+      if(briefingData.email_overview){
+        setMessages(m=>[...m,{id:Date.now(), from:'ai', text:'📧 **Emails:** ' + briefingData.email_overview}])
+        await new Promise(r=>setTimeout(r, 400))
+      }
+      
+      // Calendar overview  
+      if(briefingData.calendar_overview){
+        setMessages(m=>[...m,{id:Date.now(), from:'ai', text:'📅 **Calendar:** ' + briefingData.calendar_overview}])
+        await new Promise(r=>setTimeout(r, 400))
+      }
+      
+      // Recommendations
+      if(briefingData.recommendations && briefingData.recommendations.length > 0){
+        setMessages(m=>[...m,{id:Date.now(), from:'ai', text:'💡 **Recommendations:**\n' + briefingData.recommendations.map(rec => `• ${rec}`).join('\n')}])
+      }
+      
+    } catch(e) {
+      setMessages(m=>[...m,{id:Date.now(), from:'ai', text:'Failed to load daily briefing.'}])
     }
   }
 

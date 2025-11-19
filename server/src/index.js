@@ -5,6 +5,7 @@ const session = require('express-session')
 const authRoutes = require('./routes/auth')
 const settingsRoutes = require('./routes/settings')
 const googlePoller = require('./integrations/google/poller')
+const llmProcessingJob = require('./jobs/llmProcessingJob')
 const db = require('./db')
 const fs = require('fs')
 
@@ -16,6 +17,7 @@ app.use(session({secret:process.env.SESSION_SECRET || 'secret', resave:false, sa
 app.use('/api/auth', authRoutes)
 app.use('/api/settings', settingsRoutes)
 app.use('/api/messages', require('./routes/messages'))
+app.use('/api/llm', require('./routes/llm'))
 
 async function start(){
   try{
@@ -27,7 +29,10 @@ async function start(){
     const port = process.env.PORT || 4000
     app.listen(port, ()=>{
       console.log('server listening', port)
+      
+      // Start background jobs
       googlePoller.start()
+      llmProcessingJob.start()
     })
   }catch(e){
     console.error('failed to start', e)
