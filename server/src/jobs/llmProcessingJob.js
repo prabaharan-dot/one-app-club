@@ -1,5 +1,5 @@
-const db = require('../../db')
-const llmProcessor = require('../../llm/processor')
+const db = require('../db')
+const llmProcessor = require('../llm/processor')
 
 const PROCESSING_INTERVAL = parseInt(process.env.LLM_PROCESSING_INTERVAL || '60000') // 1 minute
 const MAX_RETRY_ATTEMPTS = parseInt(process.env.LLM_MAX_RETRIES || '3')
@@ -101,21 +101,9 @@ class LLMProcessingJob {
 
   async processUserMessages(userId, messages) {
     try {
-      // Get user's LLM settings once per batch
-      const userLLMSettings = await this.getUserLLMSettings(userId)
-      
-      if (!userLLMSettings) {
-        console.log(`No LLM settings for user ${userId}, skipping processing`)
-        // Mark as processed but with error
-        for (const msg of messages) {
-          await this.markProcessingResult(msg.id, false, 'No LLM settings configured')
-        }
-        return
-      }
-
-      // Process each message
+      // Process each message using global LLM settings
       for (const msg of messages) {
-        await this.processMessage(msg, userLLMSettings)
+        await this.processMessage(msg)
         
         // Add small delay between messages to avoid rate limiting
         await new Promise(resolve => setTimeout(resolve, 100))
@@ -131,7 +119,7 @@ class LLMProcessingJob {
     }
   }
 
-  async processMessage(message, llmSettings) {
+  async processMessage(message) {
     const startTime = Date.now()
     
     try {
@@ -156,11 +144,8 @@ class LLMProcessingJob {
         body: message.body_plain || message.body
       }
 
-      // Process with LLM
-      const result = await llmProcessor.processLLMRequest('email_actions', user, { email }, {
-        apiKey: llmSettings.apiKey,
-        model: llmSettings.model
-      })
+      // Process with LLM using global API key
+      const result = await llmProcessor.processLLMRequest('email_actions', user, { email }, {})
 
       if (result.type === 'error') {
         throw new Error(result.error)
@@ -183,7 +168,7 @@ class LLMProcessingJob {
 
       // Log LLM usage for tracking
       const processingTime = Date.now() - startTime
-      await this.logLLMUsage(message.user_id, 'email_actions', processingTime, llmSettings.model)
+      await this.logLLMUsage(message.user_id, 'email_actions', processingTime, process.env.OPENAI_MODEL || 'gpt-3.5-turbo')
 
       console.log(`Successfully processed message ${message.id} in ${processingTime}ms`)
 
@@ -194,30 +179,11 @@ class LLMProcessingJob {
       await this.markProcessingResult(message.id, false, err.message || 'Processing failed')
       
       // Log failed attempt
-      await this.logLLMUsage(message.user_id, 'email_actions', Date.now() - startTime, llmSettings.model, 'failed')
+      await this.logLLMUsage(message.user_id, 'email_actions', Date.now() - startTime, process.env.OPENAI_MODEL || 'gpt-3.5-turbo', 'failed')
     }
   }
 
-  async getUserLLMSettings(userId) {
-    try {
-      const result = await db.query(
-        'SELECT llm_key_encrypted, llm_model FROM user_settings WHERE user_id = $1',
-        [userId]
-      )
-      
-      if (result.rowCount === 0) {
-        return null
-      }
 
-      return {
-        apiKey: result.rows[0].llm_key_encrypted.toString(),
-        model: result.rows[0].llm_model || 'gpt-3.5-turbo'
-      }
-    } catch (err) {
-      console.error(`Error getting LLM settings for user ${userId}:`, err)
-      return null
-    }
-  }
 
   async incrementProcessingAttempt(messageId) {
     await db.query(`

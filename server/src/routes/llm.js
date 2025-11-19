@@ -18,15 +18,8 @@ router.post('/process', async (req, res) => {
     if (userRes.rowCount === 0) return res.status(404).json({ error: 'user_not_found' })
     const user = userRes.rows[0]
 
-    // Get user LLM settings
-    const settingsRes = await db.query('SELECT llm_key_encrypted, llm_model FROM user_settings WHERE user_id = $1', [userId])
-    const opts = settingsRes.rowCount > 0 ? {
-      apiKey: settingsRes.rows[0].llm_key_encrypted.toString(),
-      model: settingsRes.rows[0].llm_model
-    } : {}
-
-    // Process the request
-    const result = await llmProcessor.processLLMRequest(type, user, params, opts)
+    // Process the request (using global API key from environment)
+    const result = await llmProcessor.processLLMRequest(type, user, params, {})
     
     res.json({ success: true, result })
   } catch (err) {
@@ -50,15 +43,8 @@ router.get('/summary/:timeframe', async (req, res) => {
     if (userRes.rowCount === 0) return res.status(404).json({ error: 'user_not_found' })
     const user = userRes.rows[0]
 
-    // Get user LLM settings
-    const settingsRes = await db.query('SELECT llm_key_encrypted, llm_model FROM user_settings WHERE user_id = $1', [userId])
-    const opts = settingsRes.rowCount > 0 ? {
-      apiKey: settingsRes.rows[0].llm_key_encrypted.toString(),
-      model: settingsRes.rows[0].llm_model
-    } : {}
-
-    // Process email summary
-    const result = await llmProcessor.processLLMRequest('email_summary', user, { timeframe, limit }, opts)
+    // Process email summary (using global API key from environment)
+    const result = await llmProcessor.processLLMRequest('email_summary', user, { timeframe, limit }, {})
     
     res.json({ success: true, result })
   } catch (err) {
@@ -79,15 +65,8 @@ router.get('/briefing', async (req, res) => {
     if (userRes.rowCount === 0) return res.status(404).json({ error: 'user_not_found' })
     const user = userRes.rows[0]
 
-    // Get user LLM settings
-    const settingsRes = await db.query('SELECT llm_key_encrypted, llm_model FROM user_settings WHERE user_id = $1', [userId])
-    const opts = settingsRes.rowCount > 0 ? {
-      apiKey: settingsRes.rows[0].llm_key_encrypted.toString(),
-      model: settingsRes.rows[0].llm_model
-    } : {}
-
-    // Process daily briefing
-    const result = await llmProcessor.processLLMRequest('daily_briefing', user, {}, opts)
+    // Process daily briefing (using global API key from environment)
+    const result = await llmProcessor.processLLMRequest('daily_briefing', user, {}, {})
     
     res.json({ success: true, result })
   } catch (err) {
@@ -111,15 +90,8 @@ router.post('/chat', async (req, res) => {
     if (userRes.rowCount === 0) return res.status(404).json({ error: 'user_not_found' })
     const user = userRes.rows[0]
 
-    // Get user LLM settings
-    const settingsRes = await db.query('SELECT llm_key_encrypted, llm_model FROM user_settings WHERE user_id = $1', [userId])
-    const opts = settingsRes.rowCount > 0 ? {
-      apiKey: settingsRes.rows[0].llm_key_encrypted.toString(),
-      model: settingsRes.rows[0].llm_model
-    } : {}
-
-    // Process chat response
-    const result = await llmProcessor.processLLMRequest('chat_response', user, { message, context }, opts)
+    // Process chat response (using global API key from environment)
+    const result = await llmProcessor.processLLMRequest('chat_response', user, { message, context }, {})
     
     res.json({ success: true, result })
   } catch (err) {

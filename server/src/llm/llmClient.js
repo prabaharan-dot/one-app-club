@@ -8,8 +8,8 @@ if (!GLOBAL_OPENAI_KEY) {
 }
 
 async function chat(messages = [], opts = {}) {
-  const apiKey = opts.apiKey || GLOBAL_OPENAI_KEY
-  const model = opts.model || GLOBAL_MODEL
+  const apiKey = GLOBAL_OPENAI_KEY
+  const model =  GLOBAL_MODEL
   if (!apiKey) throw new Error('Missing OpenAI API key for LLM call')
   console.log(model)
 
