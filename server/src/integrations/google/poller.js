@@ -24,6 +24,20 @@ async function getUserLLMKey(userId){
   }catch(e){return null}
 }
 
+async function getLastPollTime(userId){
+  try{
+    const r = await db.query('SELECT last_gmail_poll FROM users WHERE id=$1', [userId])
+    if(r.rowCount===0) return null
+    return r.rows[0].last_gmail_poll
+  }catch(e){return null}
+}
+
+async function updateLastPollTime(userId){
+  try{
+    await db.query('UPDATE users SET last_gmail_poll=now() WHERE id=$1', [userId])
+  }catch(e){console.error('update poll time fail', e)}
+}
+
 async function upsertMessage(userId, platform, externalId, meta){
   // insert or update message, return id
   const q = `INSERT INTO messages (user_id, platform, external_message_id, sender, recipient, subject, body, body_plain, attachments, received_at, metadata, created_at)
@@ -46,30 +60,75 @@ async function poll(){
     try{
       const o = oauthClientFromTokens(row.oauth_token_encrypted.toString())
       const gmail = google.gmail({version:'v1', auth:o})
-      // list recent messages
-      const r = await gmail.users.messages.list({userId:'me', maxResults:10, q:'is:unread'})
+      
+      // get last poll time for this user
+      const lastPoll = await getLastPollTime(row.user_id)
+      let query = 'is:unread'
+      if(lastPoll){
+        // format date for gmail search: after:2023/11/19
+        const afterDate = new Date(lastPoll).toISOString().split('T')[0].replace(/-/g,'/')
+        query += ` after:${afterDate}`
+      }
+      
+      // list recent messages since last poll
+      const r = await gmail.users.messages.list({userId:'me', maxResults:50, q:query})
       const messages = r.data.messages || []
+      
+      console.log(`Found ${messages.length} messages for user ${row.user_id}`)
+      
+      // store all messages first, then process
+      const storedMessages = []
       for(const m of messages){
         try{
           const full = await gmail.users.messages.get({userId:'me', id:m.id, format:'full'})
           const body = extractPlainText(full.data)
-          const email = {id:m.id, from: parseFrom(full.data), subject: parseHeader(full.data,'Subject'), snippet: full.data.snippet, body}
-
-          // save message to DB
-          const msgId = await upsertMessage(row.user_id, 'gmail', m.id, {sender: email.from, recipient: null, subject: email.subject, body: full.data.snippet, body_plain: body, attachments: null, received_at: new Date().toISOString(), metadata: {}})
-
-          // get user-specific llm key
-          const userLLM = await getUserLLMKey(row.user_id)
-          const opts = userLLM ? {apiKey: userLLM.key, model: userLLM.model} : {}
-          // run LLM processor to get suggested actions
-          const result = await llmProcessor.processEmail({id:row.user_id, preferences:{}}, email, opts)
-          const acts = (result && result.actions) || []
-          if(acts.length>0){
-            await storeActions(msgId, row.user_id, acts)
-          }
+          const receivedDate = parseHeader(full.data, 'Date')
+          const receivedAt = receivedDate ? new Date(receivedDate).toISOString() : new Date().toISOString()
+          
+          // save message to DB first
+          const msgId = await upsertMessage(row.user_id, 'gmail', m.id, {
+            sender: parseFrom(full.data), 
+            recipient: null, 
+            subject: parseHeader(full.data,'Subject'), 
+            body: full.data.snippet, 
+            body_plain: body, 
+            attachments: null, 
+            received_at: receivedAt, 
+            metadata: {}
+          })
+          
+          storedMessages.push({
+            msgId,
+            email: {
+              id: m.id, 
+              from: parseFrom(full.data), 
+              subject: parseHeader(full.data,'Subject'), 
+              snippet: full.data.snippet, 
+              body
+            }
+          })
 
         }catch(e){ console.error('message fetch fail', e.message || e) }
       }
+      
+      // now process stored messages for LLM suggestions
+      for(const stored of storedMessages){
+        try{
+          const userLLM = await getUserLLMKey(row.user_id)
+          const opts = userLLM ? {apiKey: userLLM.key, model: userLLM.model} : {}
+          
+          // run LLM processor to get suggested actions
+          const result = await llmProcessor.processEmail({id:row.user_id, preferences:{}}, stored.email, opts)
+          const acts = (result && result.actions) || []
+          if(acts.length>0){
+            await storeActions(stored.msgId, row.user_id, acts)
+          }
+        }catch(e){ console.error('message process fail', e.message || e) }
+      }
+      
+      // update last poll time for this user
+      await updateLastPollTime(row.user_id)
+      
     }catch(e){ console.error('poll row fail', e.message || e) }
   }
 }

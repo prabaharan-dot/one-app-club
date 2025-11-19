@@ -11,6 +11,7 @@ CREATE TABLE IF NOT EXISTS users (
   display_name TEXT,
   role TEXT DEFAULT 'user', -- user/admin
   timezone TEXT DEFAULT 'UTC',
+  last_gmail_poll TIMESTAMPTZ, -- track last gmail polling time per user
   created_at TIMESTAMPTZ DEFAULT now(),
   updated_at TIMESTAMPTZ DEFAULT now()
 );
@@ -170,6 +171,9 @@ CREATE TABLE IF NOT EXISTS user_settings (
 );
 
 CREATE UNIQUE INDEX IF NOT EXISTS idx_user_settings_user ON user_settings(user_id);
+
+-- Add last_gmail_poll column to users if missing (for existing tables)
+ALTER TABLE users ADD COLUMN IF NOT EXISTS last_gmail_poll TIMESTAMPTZ;
 
 -- Safety: only create indexes if they don't exist
 CREATE INDEX IF NOT EXISTS idx_messages_user_recv ON messages(user_id, received_at DESC);
