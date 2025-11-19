@@ -232,15 +232,61 @@ ${summaryData.summary_text || 'No additional insights available.'}`
     }
   }
 
-  function send(){
+  async function send(){
     if(!text.trim()) return
     const userMsg = {id:Date.now(),from:'user',text}
+    const userText = text
     setMessages(m=>[...m,userMsg])
     setText('')
-    // simple simulated AI response
-    setTimeout(()=>{
-      setMessages(m=>[...m,{id:Date.now()+1,from:'ai',text:`I heard you: "${text}" — I can summarize, draft emails, or check your calendar.`}])
-    },800)
+    
+    try {
+      // Show typing indicator
+      const typingId = Date.now() + 1
+      setMessages(m=>[...m,{id:typingId,from:'ai',text:'...', typing: true}])
+      
+      const base = window.location.hostname === 'localhost' ? 'http://localhost:4000' : ''
+      const res = await fetch(`${base}/api/llm/chat`, {
+        method: 'POST',
+        credentials: 'include',
+        headers: {'Content-Type': 'application/json'},
+        body: JSON.stringify({ message: userText })
+      })
+      
+      // Remove typing indicator
+      setMessages(m => m.filter(msg => msg.id !== typingId))
+      
+      if (!res.ok) {
+        throw new Error(`HTTP ${res.status}`)
+      }
+      
+      const json = await res.json()
+      // Extract the actual text response from the nested object structure
+      let aiResponse = "I'm sorry, I couldn't process that request."
+      
+      if (json.response) {
+        if (typeof json.response === 'string') {
+          aiResponse = json.response
+        } else if (json.response.response) {
+          // Handle nested response object {type, response, timestamp}
+          aiResponse = json.response.response
+        } else if (json.response.type === 'chat_response' && json.response.response) {
+          aiResponse = json.response.response
+        }
+      }
+      
+      // Add AI response with slight delay for natural feel
+      setTimeout(()=>{
+        setMessages(m=>[...m,{id:Date.now(),from:'ai',text:aiResponse}])
+      }, 400)
+      
+    } catch(e) {
+      console.error('Chat error:', e)
+      // Remove typing indicator and show error
+      setMessages(m => m.filter(msg => !msg.typing))
+      setTimeout(()=>{
+        setMessages(m=>[...m,{id:Date.now(),from:'ai',text:`Sorry, I encountered an error: ${e.message}. You can still use the suggestion buttons below for email management.`}])
+      }, 400)
+    }
   }
 
   function handleKey(e){ if(e.key==='Enter' && !e.shiftKey){ e.preventDefault(); send() }}

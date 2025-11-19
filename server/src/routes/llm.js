@@ -93,7 +93,7 @@ router.post('/chat', async (req, res) => {
     // Process chat response (using global API key from environment)
     const result = await llmProcessor.processLLMRequest('chat_response', user, { message, context }, {})
     
-    res.json({ success: true, result })
+    res.json({ success: true, response: result })
   } catch (err) {
     console.error('Chat processing error:', err)
     res.status(500).json({ error: 'chat_failed', message: err.message })

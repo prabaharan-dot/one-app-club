@@ -4,7 +4,7 @@ const GLOBAL_OPENAI_KEY = process.env.GLOBAL_OPENAI_KEY
 const GLOBAL_MODEL = process.env.GLOBAL_MODEL || 'gpt-5-nano'
 
 if (!GLOBAL_OPENAI_KEY) {
-  console.warn('OPENAI_API_KEY not set — LLM calls will fail until provided unless per-user keys are supplied.')
+  console.warn('GLOBAL_OPENAI_KEY not set — LLM calls will fail.')
 }
 
 async function chat(messages = [], opts = {}) {

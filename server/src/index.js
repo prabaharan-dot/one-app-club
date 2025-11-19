@@ -12,7 +12,7 @@ const fs = require('fs')
 const app = express()
 app.use(cors({origin:process.env.CLIENT_ORIGIN || 'http://localhost:5173', credentials:true}))
 app.use(express.json())
-app.use(session({secret:process.env.SESSION_SECRET || 'secret', resave:false, saveUninitialized:false}))
+app.use(session({secret:process.env.SESSION_SECRET || 'secret', resave:true, saveUninitialized:false}))
 
 app.use('/api/auth', authRoutes)
 app.use('/api/settings', settingsRoutes)
@@ -32,7 +32,7 @@ async function start(){
       
       // Start background jobs
       googlePoller.start()
-      llmProcessingJob.start()
+      // llmProcessingJob.start()
     })
   }catch(e){
     console.error('failed to start', e)
