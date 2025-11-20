@@ -1,6 +1,8 @@
 const {google} = require('googleapis')
 const db = require('../../db')
 const actions = require('./actions')
+const { convert } = require('html-to-text')
+const striptags = require('striptags')
 
 const POLL_INTERVAL = parseInt(process.env.GOOGLE_POLL_INTERVAL || '300000') // 5 minutes
 
@@ -98,12 +100,180 @@ async function poll(){
 
 function extractPlainText(message){
   try{
-    const parts = message.payload && message.payload.parts
-    if(!parts) return ''
-    const p = parts.find(pp=>pp.mimeType==='text/plain')
-    if(p && p.body && p.body.data) return Buffer.from(p.body.data, 'base64').toString('utf8')
-    return ''
-  }catch(e){return ''}
+    let textContent = ''
+    
+    // First try to extract from message parts
+    if(message.payload && message.payload.parts && message.payload.parts.length > 0){
+      textContent = extractFromParts(message.payload.parts)
+    } 
+    // If no parts, try direct body
+    else if(message.payload && message.payload.body && message.payload.body.data){
+      const mimeType = message.payload.mimeType || 'text/plain'
+      const rawContent = Buffer.from(message.payload.body.data, 'base64').toString('utf8')
+      textContent = processContentByMimeType(rawContent, mimeType)
+    }
+    
+    // Fallback to snippet if no content found
+    if(!textContent && message.snippet){
+      textContent = message.snippet
+    }
+    
+    // Clean and normalize the text
+    return cleanEmailText(textContent)
+    
+  }catch(e){
+    console.error('extractPlainText error:', e.message)
+    return message.snippet || ''
+  }
+}
+
+function extractFromParts(parts, depth = 0){
+  if(depth > 3) return '' // Prevent infinite recursion
+  
+  let textContent = ''
+  
+  for(const part of parts){
+    // Handle nested parts recursively
+    if(part.parts && part.parts.length > 0){
+      textContent += extractFromParts(part.parts, depth + 1)
+    }
+    // Extract content from this part
+    else if(part.body && part.body.data){
+      const mimeType = part.mimeType || 'text/plain'
+      const rawContent = Buffer.from(part.body.data, 'base64').toString('utf8')
+      const processedContent = processContentByMimeType(rawContent, mimeType)
+      
+      if(processedContent){
+        textContent += processedContent + '\n'
+      }
+    }
+  }
+  
+  return textContent
+}
+
+function processContentByMimeType(content, mimeType){
+  try{
+    switch(mimeType.toLowerCase()){
+      case 'text/plain':
+        return content
+        
+      case 'text/html':
+        // Convert HTML to clean text
+        return convert(content, {
+          wordwrap: false,
+          selectors: [
+            // Remove common email signatures and footers
+            { selector: 'div[class*="signature"]', format: 'skip' },
+            { selector: 'div[class*="footer"]', format: 'skip' },
+            { selector: '.gmail_signature', format: 'skip' },
+            { selector: '.outlook_signature', format: 'skip' },
+            // Remove tracking pixels and images
+            { selector: 'img[width="1"]', format: 'skip' },
+            { selector: 'img[height="1"]', format: 'skip' },
+            // Clean up links
+            { selector: 'a', options: { ignoreHref: true } },
+            // Handle lists properly
+            { selector: 'ul', options: { uppercase: false } },
+            { selector: 'ol', options: { uppercase: false } }
+          ]
+        })
+        
+      default:
+        // For other mime types, try to strip HTML tags if present
+        return striptags(content)
+    }
+  }catch(e){
+    console.error('processContentByMimeType error:', e.message)
+    return striptags(content) // Fallback to simple tag stripping
+  }
+}
+
+function cleanEmailText(text){
+  if(!text) return ''
+  
+  // Remove excessive whitespace and normalize line breaks
+  let cleaned = text
+    .replace(/\r\n/g, '\n')           // Normalize line endings
+    .replace(/\r/g, '\n')             // Handle old Mac line endings
+    .replace(/\u00A0/g, ' ')          // Replace non-breaking spaces with regular spaces
+    .replace(/\u2028/g, '\n')         // Replace line separator with newline
+    .replace(/\u2029/g, '\n')         // Replace paragraph separator with newline
+    .replace(/[\t\v\f\r ]+/g, ' ')    // Replace multiple whitespace chars with single space
+    .replace(/\n{3,}/g, '\n\n')       // Limit consecutive line breaks to 2
+    .replace(/^\s+|\s+$/gm, '')       // Trim whitespace from each line
+    .replace(/\n\s*\n/g, '\n\n')      // Clean up lines with only whitespace
+  
+  // Remove common email artifacts and fix spacing issues
+  cleaned = cleaned
+    .replace(/^>.*$/gm, '')           // Remove quoted text lines
+    .replace(/^From:.*$/gim, '')      // Remove forwarded email headers
+    .replace(/^To:.*$/gim, '')
+    .replace(/^Cc:.*$/gim, '')
+    .replace(/^Subject:.*$/gim, '')
+    .replace(/^Date:.*$/gim, '')
+    .replace(/^Sent:.*$/gim, '')
+    .replace(/^Reply-To:.*$/gim, '')
+    .replace(/\s+,/g, ',')            // Remove spaces before commas
+    .replace(/,(\S)/g, ', $1')        // Ensure space after commas
+    .replace(/\s+\./g, '.')           // Remove spaces before periods
+    .replace(/\.(\w)/g, '. $1')       // Ensure space after periods (if followed by word)
+    .replace(/\s+:/g, ':')            // Remove spaces before colons
+    .replace(/:(\S)/g, ': $1')        // Ensure space after colons (if followed by non-space)
+    
+  // Remove common signature separators
+  cleaned = cleaned
+    .replace(/^--\s*$/gm, '')         // Standard signature separator
+    .replace(/^_{5,}$/gm, '')         // Underscore separators
+    .replace(/^-{5,}$/gm, '')         // Dash separators
+    .replace(/^={5,}$/gm, '')         // Equal sign separators
+    
+  // Remove email client footers
+  cleaned = cleaned
+    .replace(/Sent from my iPhone/gi, '')
+    .replace(/Sent from my iPad/gi, '')
+    .replace(/Sent from my Android/gi, '')
+    .replace(/Sent from Outlook/gi, '')
+    .replace(/Get Outlook for \w+/gi, '')
+    
+  // Remove tracking and unsubscribe text
+  cleaned = cleaned
+    .replace(/This email was sent to.*$/gim, '')
+    .replace(/If you no longer wish to receive.*$/gim, '')
+    .replace(/To unsubscribe.*$/gim, '')
+    .replace(/Click here to unsubscribe.*$/gim, '')
+    .replace(/View this email in your browser.*$/gim, '')
+    
+  // Remove excessive punctuation
+  cleaned = cleaned
+    .replace(/[!]{2,}/g, '!')         // Multiple exclamation marks
+    .replace(/[?]{2,}/g, '?')         // Multiple question marks
+    .replace(/[.]{3,}/g, '...')       // Multiple dots to ellipsis
+    
+  // Final cleanup - aggressive whitespace and newline removal
+  cleaned = cleaned
+    .replace(/\s+([.!?])/g, '$1')     // Remove spaces before punctuation
+    .replace(/([.!?])\s+/g, '$1 ')    // Ensure single space after punctuation
+    .replace(/[ \t]+\n/g, '\n')       // Remove trailing spaces before newlines
+    .replace(/\n[ \t]+/g, '\n')       // Remove leading spaces after newlines  
+    .replace(/\n{3,}/g, '\n\n')       // Again limit line breaks to max 2
+    .replace(/^\s+|\s+$/g, '')        // Trim start and end whitespace
+    .replace(/[ \t]{2,}/g, ' ')       // Final pass on multiple spaces
+    
+  // Remove lines that are just punctuation, very short, or only whitespace
+  const lines = cleaned.split('\n').filter(line => {
+    const trimmed = line.trim()
+    // Keep lines that are at least 3 chars and contain word characters
+    return trimmed.length > 2 && /\w/.test(trimmed) && !/^[^\w]*$/.test(trimmed)
+  })
+  
+  // Join lines and do final whitespace cleanup
+  let result = lines.join('\n')
+    .replace(/\n{2,}/g, '\n\n')       // Ensure max 2 consecutive newlines
+    .replace(/^\n+|\n+$/g, '')        // Remove leading/trailing newlines
+    .trim()                           // Final trim
+  
+  return result
 }
 
 function parseHeader(message, name){
