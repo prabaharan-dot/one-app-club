@@ -77,6 +77,12 @@ ALTER TABLE messages ADD COLUMN IF NOT EXISTS action_required BOOLEAN DEFAULT fa
 ALTER TABLE messages ADD COLUMN IF NOT EXISTS action_suggested JSONB;
 ALTER TABLE messages ADD COLUMN IF NOT EXISTS actioned BOOLEAN DEFAULT false;
 
+-- Add LLM processing status columns to messages table
+ALTER TABLE messages ADD COLUMN IF NOT EXISTS llm_processed BOOLEAN DEFAULT false;
+ALTER TABLE messages ADD COLUMN IF NOT EXISTS llm_processing_attempts INTEGER DEFAULT 0;
+ALTER TABLE messages ADD COLUMN IF NOT EXISTS llm_last_attempt TIMESTAMPTZ;
+ALTER TABLE messages ADD COLUMN IF NOT EXISTS llm_error TEXT;
+
 -- Message actions table to store LLM suggested actions (do not auto-execute)
 CREATE TABLE IF NOT EXISTS message_actions (
   id UUID PRIMARY KEY DEFAULT uuid_generate_v4(),
@@ -88,7 +94,14 @@ CREATE TABLE IF NOT EXISTS message_actions (
 );
 
 CREATE INDEX IF NOT EXISTS idx_message_actions_user ON message_actions(user_id);
+CREATE INDEX IF NOT EXISTS idx_message_actions_message ON message_actions(message_id);
+CREATE INDEX IF NOT EXISTS idx_message_actions_acted ON message_actions(user_id, acted) WHERE acted = false;
 CREATE INDEX IF NOT EXISTS idx_messages_action_required ON messages(user_id) WHERE action_required = true;
+CREATE INDEX IF NOT EXISTS idx_messages_actioned ON messages(user_id, actioned) WHERE action_required = true;
+
+-- LLM processing status indexes
+CREATE INDEX IF NOT EXISTS idx_messages_llm_unprocessed ON messages(user_id, llm_processed, received_at DESC) WHERE llm_processed = false;
+CREATE INDEX IF NOT EXISTS idx_messages_llm_retry ON messages(llm_processing_attempts, llm_last_attempt) WHERE llm_processed = false;
 
 -- Embeddings (for RAG / semantic search) using pgvector
 CREATE TABLE IF NOT EXISTS message_embeddings (
@@ -100,13 +113,25 @@ CREATE TABLE IF NOT EXISTS message_embeddings (
   created_at TIMESTAMPTZ DEFAULT now()
 );
 
--- AI Chat Messages (user <> assistant chat with the UI)
+-- Chat sessions table for persistent conversations
+CREATE TABLE IF NOT EXISTS chat_sessions (
+  id UUID PRIMARY KEY DEFAULT uuid_generate_v4(),
+  user_id UUID NOT NULL REFERENCES users(id) ON DELETE CASCADE,
+  title VARCHAR(255) DEFAULT 'New Chat',
+  created_at TIMESTAMPTZ DEFAULT now(),
+  updated_at TIMESTAMPTZ DEFAULT now()
+);
+
+-- AI Chat Messages (user <> assistant chat with the UI) - Enhanced for persistence
 CREATE TABLE IF NOT EXISTS chat_messages (
   id UUID PRIMARY KEY DEFAULT uuid_generate_v4(),
-  user_id UUID NOT NULL REFERENCES users(id),
-  role TEXT NOT NULL, -- 'user' | 'assistant' | 'system'
-  content TEXT,
-  metadata JSONB,
+  session_id UUID NOT NULL REFERENCES chat_sessions(id) ON DELETE CASCADE,
+  user_id UUID NOT NULL REFERENCES users(id) ON DELETE CASCADE,
+  message_role VARCHAR(20) NOT NULL CHECK (message_role IN ('user', 'assistant', 'system')),
+  content TEXT NOT NULL,
+  message_type VARCHAR(50) DEFAULT 'chat_response',
+  metadata JSONB DEFAULT '{}',
+  context_relevant BOOLEAN DEFAULT TRUE,
   created_at TIMESTAMPTZ DEFAULT now()
 );
 
@@ -226,10 +251,62 @@ END$$;
 
 CREATE INDEX IF NOT EXISTS idx_calendar_user_time ON calendar_events(user_id, start_time);
 
+-- Chat session and message indexes
+CREATE INDEX IF NOT EXISTS idx_chat_sessions_user_updated ON chat_sessions(user_id, updated_at DESC);
+CREATE INDEX IF NOT EXISTS idx_chat_messages_session_created ON chat_messages(session_id, created_at ASC);
+CREATE INDEX IF NOT EXISTS idx_chat_messages_user_created ON chat_messages(user_id, created_at DESC);
+CREATE INDEX IF NOT EXISTS idx_chat_messages_context ON chat_messages(session_id, context_relevant, created_at ASC) WHERE context_relevant = TRUE;
+
+-- Function to update session updated_at when messages are added
+CREATE OR REPLACE FUNCTION update_chat_session_timestamp()
+RETURNS TRIGGER AS $$
+BEGIN
+  UPDATE chat_sessions 
+  SET updated_at = NOW() 
+  WHERE id = NEW.session_id;
+  RETURN NEW;
+END;
+$$ LANGUAGE plpgsql;
+
+-- Trigger to auto-update session timestamp
+DROP TRIGGER IF EXISTS trigger_update_chat_session_timestamp ON chat_messages;
+CREATE TRIGGER trigger_update_chat_session_timestamp
+  AFTER INSERT ON chat_messages
+  FOR EACH ROW
+  EXECUTE FUNCTION update_chat_session_timestamp();
+
+-- Helper function to create initial chat message
+CREATE OR REPLACE FUNCTION create_initial_chat_message(p_session_id UUID, p_user_id UUID)
+RETURNS VOID AS $$
+BEGIN
+  INSERT INTO chat_messages (session_id, user_id, message_role, content, message_type, context_relevant)
+  VALUES (p_session_id, p_user_id, 'assistant', 'Hi! I''m your assistant. How can I help today?', 'initial_message', FALSE);
+END;
+$$ LANGUAGE plpgsql;
+
 COMMIT;
+
+-- Column and table comments for documentation
+COMMENT ON COLUMN messages.action_required IS 'True if this message requires user action based on LLM analysis';
+COMMENT ON COLUMN messages.action_suggested IS 'JSON array of LLM-suggested actions for this message';
+COMMENT ON COLUMN messages.actioned IS 'True if user has taken action on this message';
+COMMENT ON COLUMN messages.processed_at IS 'Timestamp when message was processed by LLM';
+COMMENT ON COLUMN messages.llm_processed IS 'True if message has been processed by LLM';
+COMMENT ON COLUMN messages.llm_processing_attempts IS 'Number of LLM processing attempts for this message';
+COMMENT ON COLUMN messages.llm_last_attempt IS 'Timestamp of last LLM processing attempt';
+COMMENT ON COLUMN messages.llm_error IS 'Last error message from LLM processing';
+COMMENT ON COLUMN users.last_gmail_poll IS 'Timestamp of last Gmail polling for this user - used for incremental polling';
+COMMENT ON TABLE message_actions IS 'Stores LLM-suggested actions for messages - allows multiple suggestion sets per message';
+COMMENT ON COLUMN message_actions.suggested_actions IS 'JSON array of suggested actions from LLM processing';
+COMMENT ON COLUMN message_actions.acted IS 'True if user has acted on these suggestions';
+COMMENT ON TABLE chat_sessions IS 'Persistent chat sessions for user conversations with AI assistant';
+COMMENT ON TABLE chat_messages IS 'Individual messages within chat sessions with context tracking';
+COMMENT ON COLUMN chat_messages.context_relevant IS 'Whether this message should be included in LLM context for future responses';
 
 -- Notes:
 -- 1) Using IF NOT EXISTS and a transaction makes repeated runs safe on restarts.
--- 2) For schema migrations (alter columns, add/remove columns) prefer a migration tool (sqitch, flyway, goose, or node-pg-migrate) rather than editing this file in place.
+-- 2) This file contains the complete schema consolidated from all migration files.
 -- 3) oauth_token_encrypted stored as BYTEA here: replace with an encrypted KMS/secret-manager pointer in production.
 -- 4) The unique index on (platform, external_account_id, user_id) will make ON CONFLICT work. If external_account_id can be NULL, ON CONFLICT will not match those rows — consider marking external_account_id NOT NULL if appropriate.
+-- 5) Chat persistence system supports immediate database sync and conversation context for LLM.
+-- 6) LLM processing status tracking allows for retry logic and error handling.
