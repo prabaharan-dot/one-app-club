@@ -28,7 +28,21 @@ const contextCollectors = {
   },
   
   'email_summary': async (user, params) => {
-    const { timeframe = 'today', limit = 50 } = params
+    // Extract timeframe from message if auto-detected
+    let { timeframe = 'today', limit = 50 } = params
+    
+    if (params.message && !params.timeframe) {
+      // Try to detect timeframe from the message
+      const msg = params.message.toLowerCase()
+      if (msg.includes('yesterday')) {
+        timeframe = 'yesterday'
+      } else if (msg.includes('week') || msg.includes('7 days')) {
+        timeframe = 'week'
+      } else if (msg.includes('today') || msg.includes('this morning')) {
+        timeframe = 'today'
+      }
+    }
+    
     const emails = await getEmailsForTimeframe(user.id, timeframe, limit)
     return { user, emails, timeframe, type: 'email_list' }
   },
@@ -62,18 +76,98 @@ const contextCollectors = {
   },
   
   'chat_response': async (user, params) => {
-    const { message, context = {} } = params
-    return { user, message, context, type: 'chat_interaction' }
+    const { message, context = {}, sessionId } = params
+    
+    // Get conversation history from database if sessionId provided
+    let conversationHistory = []
+    if (sessionId) {
+      try {
+        const historyResult = await db.query(`
+          SELECT 
+            message_role,
+            content,
+            created_at
+          FROM chat_messages
+          WHERE session_id = $1 AND user_id = $2 AND context_relevant = TRUE
+          ORDER BY created_at DESC
+          LIMIT 10
+        `, [sessionId, user.id])
+        
+        // Format for LLM context (reverse to chronological order)
+        conversationHistory = historyResult.rows
+          .reverse()
+          .map(msg => ({
+            role: msg.message_role === 'user' ? 'user' : 'assistant',
+            content: msg.content
+          }))
+        
+        console.log(`Loaded ${conversationHistory.length} messages from conversation history`)
+      } catch (err) {
+        console.log('Could not load conversation history:', err.message)
+      }
+    }
+    
+    // If this was auto-detected from a message, enhance context with user data
+    if (message && !params.originalProcessorType) {
+      try {
+        // Add some basic user context to make responses more helpful
+        const recentEmails = await getEmailsForTimeframe(user.id, 'today', 5)
+        const enhancedContext = {
+          ...context,
+          recent_email_count: recentEmails.length,
+          unread_count: recentEmails.filter(e => !e.is_read).length,
+          user_timezone: user.timezone || 'UTC'
+        }
+        return { 
+          user, 
+          message, 
+          context: enhancedContext, 
+          conversationHistory,
+          sessionId,
+          type: 'chat_interaction' 
+        }
+      } catch (err) {
+        // If context enhancement fails, use basic context
+        console.log('Could not enhance chat context:', err.message)
+      }
+    }
+    
+    return { 
+      user, 
+      message, 
+      context, 
+      conversationHistory,
+      sessionId,
+      type: 'chat_interaction' 
+    }
   }
 }
 
 // Main processor entry point
 async function processLLMRequest(processorType, user, params = {}, opts = {}) {
   try {
+    // If no processor type specified, try to detect from user input
+    if (!processorType && params.message) {
+      processorType = await detectProcessorType(params.message, user)
+      console.log(`Auto-detected processor type: ${processorType}`)
+    }
+    
+    // Default to chat_response if still no processor type
+    if (!processorType) {
+      processorType = 'chat_response'
+    }
+    
     // Get the processor function
     const processor = processors[processorType]
     if (!processor) {
       throw new Error(`Unknown processor type: ${processorType}`)
+    }
+    
+    // Prepare options with global credentials
+    const globalOpts = {
+      apiKey: process.env.OPENAI_API_KEY,
+      model: process.env.OPENAI_MODEL || 'gpt-4o-mini',
+      ...opts
     }
     
     // Check cache for daily briefing
@@ -87,8 +181,8 @@ async function processLLMRequest(processorType, user, params = {}, opts = {}) {
     const context = await contextCollector(user, params)
     
     // Process with LLM
-    const result = await processor(context, opts)
-    
+    const result = await processor(context, globalOpts)
+    console.log(result)
     // Cache daily briefing results
     if (processorType === 'daily_briefing' && result) {
       await cacheBriefing(user.id, result)
@@ -150,41 +244,129 @@ Return strict JSON only.`
 async function processEmailSummary(context, opts) {
   const { user, emails, timeframe } = context
   
-  const sys = `You are an assistant that creates concise, actionable email summaries.
-Return a JSON object with summary information including key themes, urgent items, and statistics.`
+  console.log(`Processing email summary for ${emails.length} emails from ${timeframe}`)
+  
+  if (emails.length === 0) {
+    return {
+      type: 'email_summary',
+      timeframe,
+      total_count: 0,
+      urgent_count: 0,
+      key_senders: [],
+      main_themes: [],
+      action_required: 0,
+      summary_text: `No emails found for ${timeframe}. Your inbox is clear!`
+    }
+  }
+  
+  const sys = `You are an AI assistant that creates concise, actionable email summaries for busy professionals.
+Analyze the provided emails and return a JSON object with comprehensive summary information.
+Focus on actionability and prioritization to help the user manage their inbox effectively.`
 
+  // Prepare richer email data for analysis
   const emailList = emails.map(e => ({
+    id: e.id,
     from: e.sender,
     subject: e.subject,
+    body_preview: e.body_plain ? e.body_plain.substring(0, 200) + '...' : '',
     received: e.received_at,
-    priority: e.importance || 'normal'
+    is_read: e.is_read || false,
+    priority: e.importance || 'normal',
+    action_required: e.action_required || false,
+    actioned: e.actioned || false
   }))
 
-  const userMessage = `
-Summarize these ${emails.length} emails from ${timeframe}:
-${JSON.stringify(emailList, null, 2)}
+  // Calculate basic statistics
+  const unreadCount = emails.filter(e => !e.is_read).length
+  const actionRequiredCount = emails.filter(e => e.action_required && !e.actioned).length
+  const urgentCount = emails.filter(e => e.importance === 'high').length
 
-Provide a JSON response with:
-- total_count: number of emails
-- urgent_count: emails needing immediate attention  
-- key_senders: top 3 senders by volume
-- main_themes: array of main topics/themes
-- action_required: emails that need responses/actions
-- summary_text: 2-3 sentence overview
+  const userMessage = `
+Analyze and summarize these ${emails.length} emails from ${timeframe} for user: ${user.display_name || user.email}
+
+Email Details:
+${JSON.stringify(emailList.slice(0, 20), null, 2)} ${emails.length > 20 ? '\n[Additional emails truncated for analysis...]' : ''}
+
+Current Stats:
+- Total emails: ${emails.length}
+- Unread: ${unreadCount}
+- Action required: ${actionRequiredCount}  
+- High priority: ${urgentCount}
+
+Provide a comprehensive JSON response with:
+- total_count: total number of emails
+- unread_count: number of unread emails
+- urgent_count: emails marked high priority or containing urgent keywords
+- action_required: number of emails needing response/action
+- key_senders: array of top 3-5 senders by volume (name and email count)
+- main_themes: array of 3-5 main topics/categories identified
+- priority_emails: array of 2-3 most important emails with brief reason why
+- summary_text: 2-3 sentence executive summary with actionable insights
+- recommendations: array of 2-3 specific next steps for the user
+- time_estimate: estimated time needed to process important emails (e.g., "30 minutes")
 `
 
   const raw = await llm.chat([
     {role: 'system', content: sys},
     {role: 'user', content: userMessage}
-  ], {temperature: 0.3, apiKey: opts.apiKey, model: opts.model})
+  ], {temperature: 0.3, max_tokens: 1000})
 
-  const jsonText = extractJson(raw)
-  const parsed = JSON.parse(jsonText)
-  
-  return {
-    type: 'email_summary',
-    timeframe,
-    ...parsed
+  try {
+    const jsonText = extractJson(raw)
+    const parsed = JSON.parse(jsonText)
+    
+    // Ensure key_senders are strings, not objects
+    if (parsed.key_senders && Array.isArray(parsed.key_senders)) {
+      parsed.key_senders = parsed.key_senders.map(sender => {
+        if (typeof sender === 'string') return sender
+        if (typeof sender === 'object') {
+          // Extract name or email from object
+          return sender.name || sender.email || sender.sender || String(sender)
+        }
+        return String(sender)
+      })
+    }
+    
+    // Ensure main_themes are strings
+    if (parsed.main_themes && Array.isArray(parsed.main_themes)) {
+      parsed.main_themes = parsed.main_themes.map(theme => String(theme))
+    }
+    
+    return {
+      type: 'email_summary',
+      timeframe,
+      generated_at: new Date().toISOString(),
+      ...parsed
+    }
+  } catch (err) {
+    console.error('Failed to parse email summary JSON:', err.message)
+    console.error('Raw LLM response:', raw)
+    
+    // Extract top senders from email data as fallback
+    const senderCounts = {}
+    emails.forEach(e => {
+      const sender = e.sender || 'Unknown'
+      senderCounts[sender] = (senderCounts[sender] || 0) + 1
+    })
+    const topSenders = Object.entries(senderCounts)
+      .sort(([,a], [,b]) => b - a)
+      .slice(0, 3)
+      .map(([sender]) => sender)
+    
+    // Return fallback summary with basic stats
+    return {
+      type: 'email_summary', 
+      timeframe,
+      total_count: emails.length,
+      unread_count: unreadCount,
+      urgent_count: urgentCount,
+      action_required: actionRequiredCount,
+      key_senders: topSenders,
+      main_themes: ['Email processing'],
+      summary_text: `You have ${emails.length} emails from ${timeframe}. ${unreadCount} are unread and ${actionRequiredCount} need action.`,
+      recommendations: ['Review unread emails', 'Respond to action items'],
+      generated_at: new Date().toISOString()
+    }
   }
 }
 
@@ -281,28 +463,48 @@ Provide a JSON response with:
 }
 
 async function processChatResponse(context, opts) {
-  const { user, message, context: chatContext } = context
+  const { user, message, context: chatContext, conversationHistory = [] } = context
   
   const sys = `You are a helpful AI assistant for One App Club, an email and productivity management platform.
 You help users with their emails, calendar, tasks, and general productivity questions.
-Be conversational, helpful, and action-oriented. Suggest specific next steps when appropriate.`
+Be conversational, helpful, and action-oriented. Suggest specific next steps when appropriate.
 
-  const userMessage = `
-User: ${user.display_name || user.email}
-Message: ${message}
-Context: ${JSON.stringify(chatContext)}
+If the user's request seems to be asking for specific functionality (like email summaries, daily briefings, or email actions), 
+you can suggest they use more specific commands or offer to help them with those features.
 
-Provide a helpful response that may include:
-- Direct answers to questions
-- Suggestions for email/calendar management
-- Productivity tips
-- Specific actions the user can take in the app
-`
+Available features you can suggest:
+- Email summaries (for timeframes like today, yesterday, this week)  
+- Daily briefings (comprehensive morning prep with priorities)
+- Email actions (reply, flag, create tasks from emails)
+- Meeting note processing
+- General productivity assistance
 
-  const raw = await llm.chat([
-    {role: 'system', content: sys},
-    {role: 'user', content: userMessage}
-  ], {temperature: 0.6, apiKey: opts.apiKey, model: opts.model})
+User context:
+- Name: ${user.display_name || user.email}
+- Recent emails: ${chatContext.recent_email_count || 0} today
+- Unread emails: ${chatContext.unread_count || 0}
+- User timezone: ${chatContext.user_timezone || 'UTC'}
+
+Use the conversation history to maintain context and provide relevant, personalized responses.`
+
+  // Build message array with conversation history
+  const messages = [
+    { role: 'system', content: sys }
+  ]
+  
+  // Add conversation history (already formatted for LLM)
+  messages.push(...conversationHistory)
+  
+  // Add current user message
+  messages.push({ role: 'user', content: message })
+  
+  console.log(`Chat model: ${opts.model}, history: ${conversationHistory.length} messages`)
+  
+  const raw = await llm.chat(messages, {
+    temperature: 0.7, 
+    apiKey: opts.apiKey, 
+    model: opts.model
+  })
 
   return {
     type: 'chat_response',
@@ -334,8 +536,9 @@ async function getEmailsForTimeframe(userId, timeframe, limit = 50) {
   }
   
   const query = `
-    SELECT id, external_message_id, sender, subject, body_plain, 
-           received_at, is_read, importance, action_required, actioned
+    SELECT id, external_message_id, sender, subject, body_plain, body,
+           received_at, is_read, importance, action_required, actioned,
+           created_at, metadata
     FROM messages 
     WHERE user_id = $1 ${timeCondition}
     ORDER BY received_at DESC 
@@ -446,6 +649,93 @@ async function cacheBriefing(userId, briefingData) {
 
 // ============= UTILITIES =============
 
+async function detectProcessorType(message, user) {
+  try {
+    const sys = `You are an intelligent router that determines what type of request a user is making.
+Based on the user's message, return ONLY one of these processor types:
+- email_actions: User wants to take action on specific emails (reply, flag, delete, etc.)
+- email_summary: User wants a summary of their emails (today, yesterday, this week, etc.)
+- daily_briefing: User wants a comprehensive daily overview/briefing/prep for their day
+- meeting_notes: User wants to process meeting notes or transcripts
+- chat_response: General questions, casual chat, or anything else
+
+Return ONLY the processor type, no explanation.`
+
+    const userMessage = `
+User message: "${message}"
+Context: User is ${user.display_name || user.email}
+
+What type of request is this? Return only the processor type.`
+
+    const response = await llm.chat([
+      {role: 'system', content: sys},
+      {role: 'user', content: userMessage}
+    ], {temperature: 0.1, max_tokens: 50})
+    
+
+    const detectedType = response.trim().toLowerCase()
+    console.log("processor detected "+ detectedType)
+    
+    // Validate the detected type
+    const validTypes = ['email_actions', 'email_summary', 'daily_briefing', 'meeting_notes', 'chat_response']
+    if (validTypes.includes(detectedType)) {
+      return detectedType
+    }
+    
+    // Fallback pattern matching if AI fails
+    return fallbackProcessorDetection(message)
+    
+  } catch (err) {
+    console.error('AI processor detection failed:', err.message)
+    return fallbackProcessorDetection(message)
+  }
+}
+
+function fallbackProcessorDetection(message) {
+  const msg = message.toLowerCase().trim()
+  
+  // Email summary patterns
+  if (msg.match(/\b(summarize?|summary|overview|digest)\b.*\b(email|mail|message)s?\b/i) ||
+      msg.match(/\b(today'?s?|yesterday'?s?|this week'?s?)\s+(email|mail|message)s?\b/i) ||
+      msg.match(/\bwhat.*email.*received?\b/i) ||
+      msg.match(/\bhow many.*email/i)) {
+    return 'email_summary'
+  }
+  
+  // Daily briefing patterns  
+  if (msg.match(/\b(brief|briefing|prep|prepare|ready|start|begin).*day\b/i) ||
+      msg.match(/\b(morning|daily)\s+(brief|briefing|update|overview|summary)\b/i) ||
+      msg.match(/\bwhat.*today\b/i) ||
+      msg.match(/\bget.*ready.*day\b/i) ||
+      msg.match(/\bpriority|priorities.*today\b/i)) {
+    return 'daily_briefing'
+  }
+  
+  // Email actions patterns
+  if (msg.match(/\b(reply|respond|answer|forward|delete|archive|flag|mark)\b.*\b(email|mail|message)\b/i) ||
+      msg.match(/\bhelp.*\b(reply|respond|answer)\b.*\b(email|mail|message)\b/i) ||
+      msg.match(/\b(create|schedule|add).*\b(task|event|meeting|appointment)\b.*\bemail\b/i) ||
+      msg.match(/\baction.*email/i)) {
+    return 'email_actions'
+  }
+  
+  // Daily briefing patterns (more specific)
+  if (msg.match(/\b(brief|briefing).*\b(morning|day)\b/i) ||
+      msg.match(/\bmorning.*brief/i)) {
+    return 'daily_briefing'
+  }
+  
+  // Meeting notes patterns
+  if (msg.match(/\b(meeting|call|conference)\s+(notes?|transcript|summary|minutes)\b/i) ||
+      msg.match(/\bprocess.*\b(meeting|transcript|notes?)\b/i) ||
+      msg.match(/\b(action items?|decisions?|takeaways?).*meeting\b/i)) {
+    return 'meeting_notes'
+  }
+  
+  // Default to chat response
+  return 'chat_response'
+}
+
 function extractJson(text = '') {
   const first = text.indexOf('{')
   const last = text.lastIndexOf('}')
@@ -456,6 +746,7 @@ function extractJson(text = '') {
 module.exports = { 
   processEmail,           // Legacy compatibility
   processLLMRequest,      // New generic processor
+  detectProcessorType,    // Intelligent processor detection
   processEmailActions,
   processEmailSummary,
   processDailyBriefing,

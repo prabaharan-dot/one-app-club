@@ -28,6 +28,7 @@ app.use('/api/auth', authRoutes)
 app.use('/api/settings', settingsRoutes)
 app.use('/api/messages', require('./routes/messages'))
 app.use('/api/llm', require('./routes/llm'))
+app.use('/api/chat', require('./routes/chat'))
 
 async function start(){
   try{

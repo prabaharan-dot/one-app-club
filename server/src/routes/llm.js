@@ -82,7 +82,7 @@ router.post('/chat', async (req, res) => {
     const userId = req.session && req.session.userId
     if (!userId) return res.status(401).json({ error: 'not_logged_in' })
 
-    const { message, context = {} } = req.body
+    const { message, context = {}, processorType = null } = req.body
     if (!message) return res.status(400).json({ error: 'missing_message' })
 
     // Get user data
@@ -90,13 +90,44 @@ router.post('/chat', async (req, res) => {
     if (userRes.rowCount === 0) return res.status(404).json({ error: 'user_not_found' })
     const user = userRes.rows[0]
 
-    // Process chat response (using global API key from environment)
-    const result = await llmProcessor.processLLMRequest('chat_response', user, { message, context }, {})
+    // Process with intelligent processor detection (pass null or processorType)
+    const result = await llmProcessor.processLLMRequest(processorType, user, { message, context }, {})
     
-    res.json({ success: true, response: result })
+    res.json({ success: true, response: result, detectedType: result.type })
   } catch (err) {
     console.error('Chat processing error:', err)
     res.status(500).json({ error: 'chat_failed', message: err.message })
+  }
+})
+
+// POST /api/llm/intelligent
+// New intelligent endpoint that auto-detects user intent and routes accordingly
+router.post('/intelligent', async (req, res) => {
+  try {
+    const userId = req.session && req.session.userId
+    if (!userId) return res.status(401).json({ error: 'not_logged_in' })
+
+    const { message, context = {}, sessionId } = req.body
+    if (!message) return res.status(400).json({ error: 'missing_message' })
+
+    // Get user data
+    const userRes = await db.query('SELECT * FROM users WHERE id = $1', [userId])
+    if (userRes.rowCount === 0) return res.status(404).json({ error: 'user_not_found' })
+    const user = userRes.rows[0]
+
+    // Always use intelligent detection (pass null for processor type)
+    const result = await llmProcessor.processLLMRequest(null, user, { message, context, sessionId }, {})
+    
+    res.json({ 
+      success: true, 
+      response: result,
+      detectedType: result.type,
+      sessionId,
+      message: 'Intelligently processed your request'
+    })
+  } catch (err) {
+    console.error('Intelligent processing error:', err)
+    res.status(500).json({ error: 'processing_failed', message: err.message })
   }
 })
 
@@ -218,6 +249,45 @@ router.post('/retry-failed', async (req, res) => {
   } catch (err) {
     console.error('Retry failed error:', err)
     res.status(500).json({ error: 'retry_failed', message: err.message })
+  }
+})
+
+// POST /api/llm/debug-chat - Temporary debug endpoint
+router.post('/debug-chat', async (req, res) => {
+  try {
+    const { message = 'hello', context = {} } = req.body
+    
+    // Mock user for testing with proper UUID format
+    const user = {
+      id: 'ec5ea4d4-ab0d-414c-9caf-4a65c44c634b', // Use existing user ID from logs
+      email: 'debug@example.com',
+      display_name: 'Debug User'
+    }
+    
+    console.log('=== DEBUG CHAT REQUEST ===')
+    console.log('Message:', message)
+    console.log('Context:', context)
+    console.log('Environment - OPENAI_API_KEY:', process.env.OPENAI_API_KEY ? 'SET' : 'MISSING')
+    console.log('Environment - OPENAI_MODEL:', process.env.OPENAI_MODEL)
+    
+    // Process with intelligent processor detection
+    const result = await llmProcessor.processLLMRequest(null, user, { message, context }, {})
+    
+    console.log('=== DEBUG CHAT RESULT ===')
+    console.log('Result:', JSON.stringify(result, null, 2))
+    
+    res.json({ 
+      success: true, 
+      response: result,
+      detectedType: result.type,
+      debug: {
+        envApiKey: process.env.OPENAI_API_KEY ? 'SET' : 'MISSING',
+        envModel: process.env.OPENAI_MODEL
+      }
+    })
+  } catch (err) {
+    console.error('Debug chat error:', err)
+    res.status(500).json({ error: 'debug_failed', message: err.message })
   }
 })
 

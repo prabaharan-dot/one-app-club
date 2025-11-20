@@ -1,15 +1,16 @@
 const { OpenAI } = require('openai')
 
-const GLOBAL_OPENAI_KEY = process.env.GLOBAL_OPENAI_KEY
-const GLOBAL_MODEL = process.env.GLOBAL_MODEL || 'gpt-5-nano'
+const GLOBAL_OPENAI_KEY = process.env.OPENAI_API_KEY
+const GLOBAL_MODEL = process.env.OPENAI_MODEL || 'gpt-4o-mini'
 
 if (!GLOBAL_OPENAI_KEY) {
-  console.warn('GLOBAL_OPENAI_KEY not set — LLM calls will fail.')
+  console.warn('OPENAI_API_KEY not set — LLM calls will fail.')
 }
 
 async function chat(messages = [], opts = {}) {
   const apiKey = GLOBAL_OPENAI_KEY
   const model =  GLOBAL_MODEL
+  
   if (!apiKey) throw new Error('Missing OpenAI API key for LLM call')
   console.log(model)
 

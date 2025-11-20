@@ -1,14 +1,100 @@
 import React, { useState, useRef, useEffect } from 'react'
 
 export default function ChatWindow(){
-  const [messages, setMessages] = useState([
-    {id:1,from:'ai',text:'Hi! I\'m your assistant. How can I help today?'}
-  ])
+  const [messages, setMessages] = useState([])
   const [text, setText] = useState('')
   const [focusedSuggest, setFocusedSuggest] = useState(null) // 'recent' | 'important' | 'brief' | null
+  const [currentSessionId, setCurrentSessionId] = useState(null)
+  const [sessionLoading, setSessionLoading] = useState(true)
   const bodyRef = useRef()
 
   useEffect(()=>{ if(bodyRef.current) bodyRef.current.scrollTop = bodyRef.current.scrollHeight },[messages])
+  
+  // Initialize session on component mount
+  useEffect(() => {
+    initializeSession()
+  }, [])
+  
+  // Initialize or load existing session
+  async function initializeSession() {
+    try {
+      const base = window.location.hostname === 'localhost' ? 'http://localhost:4000' : ''
+      
+      // Create new session for now (in future, could load most recent session)
+      const res = await fetch(`${base}/api/chat/sessions`, {
+        method: 'POST',
+        credentials: 'include',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({ title: 'New Chat' })
+      })
+      
+      if (!res.ok) throw new Error('Failed to create session')
+      
+      const json = await res.json()
+      const sessionId = json.session.id
+      
+      setCurrentSessionId(sessionId)
+      
+      // Load session messages (includes initial message)
+      await loadSessionMessages(sessionId)
+      
+    } catch (err) {
+      console.error('Session initialization failed:', err)
+      // Fallback to local-only mode
+      setMessages([{id: 1, from: 'ai', text: 'Hi! I\'m your assistant. How can I help today?'}])
+    } finally {
+      setSessionLoading(false)
+    }
+  }
+  
+  // Load messages for a session
+  async function loadSessionMessages(sessionId) {
+    try {
+      const base = window.location.hostname === 'localhost' ? 'http://localhost:4000' : ''
+      const res = await fetch(`${base}/api/chat/sessions/${sessionId}`, {
+        credentials: 'include'
+      })
+      
+      if (!res.ok) throw new Error('Failed to load messages')
+      
+      const json = await res.json()
+      setMessages(json.messages || [])
+      
+    } catch (err) {
+      console.error('Failed to load session messages:', err)
+    }
+  }
+  
+  // Save message to database
+  async function saveMessage(role, content, type = 'chat_response', metadata = {}) {
+    if (!currentSessionId) return null
+    
+    try {
+      const base = window.location.hostname === 'localhost' ? 'http://localhost:4000' : ''
+      const res = await fetch(`${base}/api/chat/messages`, {
+        method: 'POST',
+        credentials: 'include',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({
+          sessionId: currentSessionId,
+          role,
+          content,
+          type,
+          metadata,
+          contextRelevant: true
+        })
+      })
+      
+      if (!res.ok) throw new Error('Failed to save message')
+      
+      const json = await res.json()
+      return json.message
+      
+    } catch (err) {
+      console.error('Failed to save message:', err)
+      return null
+    }
+  }
 
   // helper to load pending messages and stream them into the chat
   async function loadPendingMessages(){
@@ -99,11 +185,30 @@ export default function ChatWindow(){
       setMessages(m=>[...m,{id:Date.now(), from:'ai', text:'Here\'s your email summary for today:'}])
       await new Promise(r=>setTimeout(r, 400))
       
+      // Process key senders to handle both string arrays and object arrays
+      let keySendersText = 'None'
+      if (summaryData.key_senders && Array.isArray(summaryData.key_senders)) {
+        const senderNames = summaryData.key_senders.map(sender => {
+          if (typeof sender === 'string') return sender
+          if (typeof sender === 'object' && sender.name) return sender.name
+          if (typeof sender === 'object' && sender.email) return sender.email
+          if (typeof sender === 'object' && sender.sender) return sender.sender
+          return String(sender)
+        }).filter(name => name && name !== '[object Object]')
+        keySendersText = senderNames.length > 0 ? senderNames.join(', ') : 'None'
+      }
+      
+      // Process themes
+      let themesText = 'None'
+      if (summaryData.main_themes && Array.isArray(summaryData.main_themes)) {
+        themesText = summaryData.main_themes.join(', ')
+      }
+      
       const summary = `📧 **Email Summary**
 • Total emails: ${summaryData.total_count || 0}
 • Urgent items: ${summaryData.urgent_count || 0}
-• Key senders: ${summaryData.key_senders ? summaryData.key_senders.join(', ') : 'None'}
-• Main themes: ${summaryData.main_themes ? summaryData.main_themes.join(', ') : 'None'}
+• Key senders: ${keySendersText}
+• Main themes: ${themesText}
 
 ${summaryData.summary_text || 'No additional insights available.'}`
 
@@ -233,11 +338,14 @@ ${summaryData.summary_text || 'No additional insights available.'}`
   }
 
   async function send(){
-    if(!text.trim()) return
+    if(!text.trim() || !currentSessionId) return
     const userMsg = {id:Date.now(),from:'user',text}
     const userText = text
     setMessages(m=>[...m,userMsg])
     setText('')
+    
+    // Save user message to database
+    await saveMessage('user', userText, 'chat_response')
     
     try {
       // Show typing indicator
@@ -245,11 +353,14 @@ ${summaryData.summary_text || 'No additional insights available.'}`
       setMessages(m=>[...m,{id:typingId,from:'ai',text:'...', typing: true}])
       
       const base = window.location.hostname === 'localhost' ? 'http://localhost:4000' : ''
-      const res = await fetch(`${base}/api/llm/chat`, {
+      const res = await fetch(`${base}/api/llm/intelligent`, {
         method: 'POST',
         credentials: 'include',
         headers: {'Content-Type': 'application/json'},
-        body: JSON.stringify({ message: userText })
+        body: JSON.stringify({ 
+          message: userText,
+          sessionId: currentSessionId
+        })
       })
       
       // Remove typing indicator
@@ -260,31 +371,150 @@ ${summaryData.summary_text || 'No additional insights available.'}`
       }
       
       const json = await res.json()
+      console.log('Server response:', json) // Debug log
+      
       // Extract the actual text response from the nested object structure
       let aiResponse = "I'm sorry, I couldn't process that request."
+      let detectedType = null
+      let summaryData = null
       
       if (json.response) {
         if (typeof json.response === 'string') {
           aiResponse = json.response
+        } else if (json.response.type) {
+          // Handle structured response object with type
+          detectedType = json.response.type || json.detectedType
+          
+          if (detectedType === 'email_summary') {
+            // For email summaries, the structured data IS the response object itself
+            summaryData = json.response
+            aiResponse = json.response.summary_text || "Email summary processed"
+          } else if (detectedType === 'chat_response') {
+            aiResponse = json.response.response || json.response.text || "Response received"
+          } else if (detectedType === 'daily_briefing') {
+            summaryData = json.response
+            aiResponse = json.response.response || json.response.summary || "Daily briefing processed"
+          } else {
+            aiResponse = json.response.response || json.response.text || JSON.stringify(json.response)
+          }
         } else if (json.response.response) {
           // Handle nested response object {type, response, timestamp}
           aiResponse = json.response.response
+          detectedType = json.response.type || json.detectedType
+          
+          // Check if this is an email summary response with structured data
+          if (detectedType === 'email_summary' && json.response.data) {
+            summaryData = json.response.data
+          }
         } else if (json.response.type === 'chat_response' && json.response.response) {
           aiResponse = json.response.response
+          detectedType = json.response.type
         }
       }
       
+      // Fallback to detectedType from top level
+      if (!detectedType) {
+        detectedType = json.detectedType
+      }
+      
+      // Format email summaries specially
+      if (detectedType === 'email_summary' && summaryData) {
+        // Process key senders to handle both string arrays and object arrays
+        let keySendersText = 'None'
+        if (summaryData.key_senders && Array.isArray(summaryData.key_senders)) {
+          const senderNames = summaryData.key_senders.map(sender => {
+            if (typeof sender === 'string') return sender
+            if (typeof sender === 'object' && sender.name) return sender.name
+            if (typeof sender === 'object' && sender.email) return sender.email
+            if (typeof sender === 'object' && sender.sender) return sender.sender
+            return String(sender)
+          }).filter(name => name && name !== '[object Object]')
+          keySendersText = senderNames.length > 0 ? senderNames.join(', ') : 'None'
+        }
+        
+        // Process themes
+        let themesText = 'None'
+        if (summaryData.main_themes && Array.isArray(summaryData.main_themes)) {
+          themesText = summaryData.main_themes.join(', ')
+        }
+        
+        // Format priority emails
+        let priorityText = ''
+        if (summaryData.priority_emails && summaryData.priority_emails.length > 0) {
+          priorityText = '\n\n🎯 **Priority Emails:**\n' + 
+            summaryData.priority_emails.map((email, idx) => 
+              `${idx + 1}. "${email.subject}" - ${email.reason}`
+            ).join('\n')
+        }
+        
+        // Format recommendations
+        let recommendationsText = ''
+        if (summaryData.recommendations && summaryData.recommendations.length > 0) {
+          recommendationsText = '\n\n💡 **Recommendations:**\n' + 
+            summaryData.recommendations.map(rec => `• ${rec}`).join('\n')
+        }
+        
+        // Format time estimate
+        let timeText = ''
+        if (summaryData.time_estimate) {
+          timeText = `\n\n⏰ **Estimated time needed:** ${summaryData.time_estimate}`
+        }
+        
+        aiResponse = `📧 **Email Summary for ${summaryData.timeframe || 'today'}**
+• Total emails: ${summaryData.total_count || 0}
+• Unread: ${summaryData.unread_count || 0} | Urgent: ${summaryData.urgent_count || 0}
+• Key senders: ${keySendersText}
+• Main themes: ${themesText}
+
+${summaryData.summary_text || aiResponse}${priorityText}${recommendationsText}${timeText}`
+      } else if (detectedType === 'daily_briefing' && json.response.data) {
+        // Format daily briefing specially
+        const briefingData = json.response.data
+        let briefingText = json.response.response || ''
+        
+        if (briefingData.priority_items && briefingData.priority_items.length > 0) {
+          briefingText += '\n\n🎯 **Top Priorities:**\n' + 
+            briefingData.priority_items.map((item, idx) => `${idx + 1}. ${item}`).join('\n')
+        }
+        
+        if (briefingData.email_overview) {
+          briefingText += '\n\n📧 **Emails:** ' + briefingData.email_overview
+        }
+        
+        if (briefingData.calendar_overview) {
+          briefingText += '\n\n📅 **Calendar:** ' + briefingData.calendar_overview
+        }
+        
+        aiResponse = briefingText
+      } else if (detectedType && detectedType !== 'chat_response') {
+        // Add detected type info for debugging (optional)
+        aiResponse = `🤖 *Detected: ${detectedType.replace('_', ' ')}*\n\n${aiResponse}`
+      }
+      
       // Add AI response with slight delay for natural feel
-      setTimeout(()=>{
-        setMessages(m=>[...m,{id:Date.now(),from:'ai',text:aiResponse}])
+      setTimeout(async ()=>{
+        setMessages(m=>[...m,{
+          id:Date.now(),
+          from:'ai',
+          text:aiResponse,
+          type: detectedType || 'chat_response',
+          data: summaryData
+        }])
+        
+        // Save AI response to database
+        await saveMessage('assistant', aiResponse, detectedType || 'chat_response', summaryData || {})
       }, 400)
       
     } catch(e) {
       console.error('Chat error:', e)
       // Remove typing indicator and show error
       setMessages(m => m.filter(msg => !msg.typing))
-      setTimeout(()=>{
-        setMessages(m=>[...m,{id:Date.now(),from:'ai',text:`Sorry, I encountered an error: ${e.message}. You can still use the suggestion buttons below for email management.`}])
+      setTimeout(async ()=>{
+        const errorMsg = `Sorry, I encountered an error: ${e.message}. You can still use the suggestion buttons below for email management.`
+        setMessages(m=>[...m,{id:Date.now(),from:'ai',text:errorMsg}])
+        
+        // Save error message to database
+        await saveMessage('assistant', errorMsg, 'error_response', { error: e.message })
       }, 400)
     }
   }
@@ -299,9 +529,24 @@ ${summaryData.summary_text || 'No additional insights available.'}`
           <div className="small">Minimal • Fast • Thoughtful</div>
         </div>
         <div className="chat-body" ref={bodyRef}>
-          {messages.map(m=> (
+          {sessionLoading ? (
+            <div className="message ai" style={{ padding: '20px', textAlign: 'center', color: '#666' }}>
+              <div>🔄 Initializing chat session...</div>
+            </div>
+          ) : (
+            messages.map(m=> (
             <div key={m.id} className={`message ${m.from}`} aria-live="polite">
-              <div style={{whiteSpace:'pre-wrap'}}>{m.text}</div>
+              <div style={{
+                whiteSpace:'pre-wrap',
+                background: m.type === 'email_summary' ? 'linear-gradient(135deg, #f8fafc 0%, #f1f5f9 100%)' : 'transparent',
+                padding: m.type === 'email_summary' ? '12px' : '0',
+                borderRadius: m.type === 'email_summary' ? '8px' : '0',
+                border: m.type === 'email_summary' ? '1px solid rgba(0,0,0,0.05)' : 'none',
+                fontSize: m.typing ? '14px' : '15px',
+                color: m.typing ? '#666' : 'inherit'
+              }}>
+                {m.typing ? '💭 Thinking...' : m.text}
+              </div>
 
               {/* render single suggested action buttons attached to a message */}
               {m.suggestedAction && (
@@ -338,15 +583,31 @@ ${summaryData.summary_text || 'No additional insights available.'}`
                 </div>
               )}
             </div>
-          ))}
+            ))
+          )}
         </div>
         <div className="chat-input">
-          <textarea className="input-box" rows={1} value={text} onChange={e=>setText(e.target.value)} onKeyDown={handleKey} placeholder="Type a message... (Enter to send)" />
-          <button className="send-btn" onClick={send} aria-label="Send message">Send</button>
+          <textarea 
+            className="input-box" 
+            rows={1} 
+            value={text} 
+            onChange={e=>setText(e.target.value)} 
+            onKeyDown={handleKey} 
+            placeholder={sessionLoading ? "Setting up chat..." : "Type a message... (Enter to send)"} 
+            disabled={sessionLoading}
+          />
+          <button 
+            className="send-btn" 
+            onClick={send} 
+            aria-label="Send message"
+            disabled={sessionLoading || !text.trim()}
+          >
+            Send
+          </button>
         </div>
 
         {/* suggestions bar below input */}
-        <div style={{padding:'10px',borderTop:'1px solid rgba(0,0,0,0.04)', display:'flex', gap:8, alignItems:'center', justifyContent:'center'}} aria-hidden="false">
+        <div style={{padding:'10px',borderTop:'1px solid rgba(0,0,0,0.04)', display:'flex', gap:8, alignItems:'center', justifyContent:'center', flexWrap:'wrap'}} aria-hidden="false">
           <button
             onClick={loadPendingMessages}
             onFocus={()=>setFocusedSuggest('recent')}
@@ -355,8 +616,8 @@ ${summaryData.summary_text || 'No additional insights available.'}`
             aria-label="Recent unread mails (Alt+1)"
             aria-keyshortcuts="Alt+1"
             title="Recent unread mails — Alt+1"
-            style={{padding:'8px 12px', borderRadius:20, border:'1px solid rgba(0,0,0,0.06)', background:'#fff', outline: focusedSuggest==='recent' ? '3px solid rgba(21,156,228,0.25)' : 'none'}}
-          >recent unread mails</button>
+            style={{padding:'8px 12px', borderRadius:20, border:'1px solid rgba(0,0,0,0.06)', background:'#fff', outline: focusedSuggest==='recent' ? '3px solid rgba(21,156,228,0.25)' : 'none', fontSize:'12px'}}
+          >📬 recent mails</button>
 
           <button
             onClick={loadImportantMessages}
@@ -366,8 +627,8 @@ ${summaryData.summary_text || 'No additional insights available.'}`
             aria-label="Important messages (Alt+2)"
             aria-keyshortcuts="Alt+2"
             title="Important messages — Alt+2"
-            style={{padding:'8px 12px', borderRadius:20, border:'1px solid rgba(0,0,0,0.06)', background:'#fff', outline: focusedSuggest==='important' ? '3px solid rgba(21,156,228,0.25)' : 'none'}}
-          >important messages</button>
+            style={{padding:'8px 12px', borderRadius:20, border:'1px solid rgba(0,0,0,0.06)', background:'#fff', outline: focusedSuggest==='important' ? '3px solid rgba(21,156,228,0.25)' : 'none', fontSize:'12px'}}
+          >⚡ important</button>
 
           <button
             onClick={briefMe}
@@ -377,8 +638,26 @@ ${summaryData.summary_text || 'No additional insights available.'}`
             aria-label="Brief me (Alt+3)"
             aria-keyshortcuts="Alt+3"
             title="Brief me — Alt+3"
-            style={{padding:'8px 12px', borderRadius:20, border:'1px solid rgba(0,0,0,0.06)', background:'#fff', outline: focusedSuggest==='brief' ? '3px solid rgba(21,156,228,0.25)' : 'none'}}
-          >brief me</button>
+            style={{padding:'8px 12px', borderRadius:20, border:'1px solid rgba(0,0,0,0.06)', background:'#fff', outline: focusedSuggest==='brief' ? '3px solid rgba(21,156,228,0.25)' : 'none', fontSize:'12px'}}
+          >📋 brief me</button>
+
+          <button
+            onClick={() => {
+              setText('summarize my emails from today')
+              setTimeout(() => send(), 100)
+            }}
+            style={{padding:'8px 12px', borderRadius:20, border:'1px solid rgba(0,0,0,0.06)', background:'#fff', fontSize:'12px'}}
+            title="Get an AI-powered email summary"
+          >📧 email summary</button>
+
+          <button
+            onClick={() => {
+              setText('give me a daily briefing')
+              setTimeout(() => send(), 100)
+            }}
+            style={{padding:'8px 12px', borderRadius:20, border:'1px solid rgba(0,0,0,0.06)', background:'#fff', fontSize:'12px'}}
+            title="Get your daily briefing with priorities"
+          >🌅 daily briefing</button>
         </div>
       </div>
     </main>
