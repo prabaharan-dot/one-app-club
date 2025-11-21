@@ -8,6 +8,7 @@ const googlePoller = require('./integrations/google/poller')
 const llmProcessingJob = require('./jobs/llmProcessingJob')
 const db = require('./db')
 const fs = require('fs')
+const { userContextMiddleware } = require('./middleware/userContext')
 
 const app = express()
 app.use(cors({origin:process.env.CLIENT_ORIGIN || 'http://localhost:5173', credentials:true}))
@@ -20,9 +21,14 @@ app.use(session({
   resave:false, 
   saveUninitialized:false,
   cookie: {
-    maxAge: 30 * 24 * 60 * 60 * 1000
+    maxAge: 30 * 24 * 60 * 60 * 1000,
+    sameSite: 'lax', // Allow cookies in popup windows
+    secure: false // Set to true only in production with HTTPS
   }
 }))
+
+// Add user context middleware after session middleware but before routes
+app.use(userContextMiddleware)
 
 app.use('/api/auth', authRoutes)
 app.use('/api/settings', settingsRoutes)

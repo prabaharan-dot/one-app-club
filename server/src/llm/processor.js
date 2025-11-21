@@ -17,7 +17,8 @@ const processors = {
   'email_summary': processEmailSummary, 
   'daily_briefing': processDailyBriefing,
   'meeting_notes': processMeetingNotes,
-  'chat_response': processChatResponse
+  'chat_response': processChatResponse,
+  'parse_meeting': parseMeetingRequirements
 }
 
 // Context collectors for different processor types
@@ -73,6 +74,11 @@ const contextCollectors = {
   'meeting_notes': async (user, params) => {
     const { meetingId, transcript } = params
     return { user, meetingId, transcript, type: 'meeting_transcript' }
+  },
+  
+  'parse_meeting': async (user, params) => {
+    const { meetingText } = params
+    return { user, meetingText, type: 'meeting_parsing' }
   },
   
   'chat_response': async (user, params) => {
@@ -210,6 +216,12 @@ async function processEmailActions(context, opts) {
   const sys = `You are an intelligent email assistant that analyzes emails and provides actionable summaries and suggestions.
 Analyze the email content, determine its importance, intent, and suggest the most appropriate actions for the user.
 
+IMPORTANT TIMEZONE HANDLING:
+- User's timezone is: ${user.timezone || 'UTC'}
+- All times must be interpreted and calculated in the user's timezone
+- When suggesting meeting times or events, always consider the user's local time
+- Convert any times mentioned in emails to the user's timezone before creating calendar events
+
 Return a JSON object with:
 - summary: 2-3 sentence summary of the email content and intent
 - priority_level: "high", "medium", or "low" based on urgency and importance
@@ -220,12 +232,18 @@ Return a JSON object with:
 Available action types:
 - mark_as_priority: Mark email as high priority
 - flag_as_spam: Flag as spam/unwanted
-- create_event: Create calendar event (include title, start_time, duration)
+- create_event: Create calendar event (include title, start_time, duration in user timezone)
+- create_meeting: Schedule meeting with sender (include title, suggested_times, duration in user timezone)
 - create_task: Create a task (include title, description, due_date)
 - mark_as_read: Mark as read (for low-priority items)
 - draft_reply: Suggest a reply (include reply_type, tone, key_points)
 - archive: Archive the email
 - forward: Forward to someone (include reason)
+
+For create_event and create_meeting actions:
+- start_time and end_time should be in ISO format with proper timezone offset
+- Use the user's timezone (${user.timezone || 'UTC'}) for all time calculations
+- If user says "9 AM", interpret it as 9 AM in their timezone (${user.timezone || 'UTC'})
 
 Each action should include:
 - type: action type
@@ -236,8 +254,19 @@ Each action should include:
 
 Be selective - only suggest actions that truly make sense for this email.`
 
+  // Build user context for personalized assistance
+  const userContext = []
+  if (user.display_name) userContext.push(`Name: ${user.display_name}`)
+  if (user.role) userContext.push(`Role: ${user.role}`)
+  if (user.location) userContext.push(`Location: ${user.location}`)
+  if (user.timezone) userContext.push(`Timezone: ${user.timezone}`)
+  if (user.personal_note) userContext.push(`Personal Note: ${user.personal_note}`)
+
   const userMessage = `
 Analyze this email for user: ${user.display_name || user.email}
+
+User Context:
+${userContext.length > 0 ? userContext.join('\n') : 'No additional context provided'}
 
 User Preferences: ${JSON.stringify(prefs)}
 
@@ -591,9 +620,12 @@ Available features you can suggest:
 
 User context:
 - Name: ${user.display_name || user.email}
+- Role: ${user.role || 'Not specified'}
+- Location: ${user.location || 'Not specified'}
+- Timezone: ${user.timezone || chatContext.user_timezone || 'UTC'}
+- Personal note: ${user.personal_note || 'No personal context provided'}
 - Recent emails: ${chatContext.recent_email_count || 0} today
 - Unread emails: ${chatContext.unread_count || 0}
-- User timezone: ${chatContext.user_timezone || 'UTC'}
 
 Use the conversation history to maintain context and provide relevant, personalized responses.`
 
@@ -853,13 +885,358 @@ function extractJson(text = '') {
   return text.slice(first, last + 1)
 }
 
+// Followup action processor for prepare requests
+async function followupActionOnEmail(user, email, opts, context = {}) {
+  const { selectedAction, calendarBusy } = context
+  
+  if (!selectedAction || !selectedAction.type) {
+    return { actions: [], followups: [] }
+  }
+  
+  const actionType = selectedAction.type
+  
+  // Handle specific action types that need LLM assistance
+  if (actionType === 'draft_reply') {
+    return await generateReplyDraft(user, email, selectedAction, opts)
+  } else if (actionType === 'create_meeting' || actionType === 'create_event') {
+    return await generateMeetingProposal(user, email, selectedAction, opts, calendarBusy)
+  }
+  
+  // For other actions, return empty suggestions
+  return { actions: [], followups: [] }
+}
+
+// Generate AI-powered reply draft
+async function generateReplyDraft(user, email, action, opts) {
+  const sys = `You are an email assistant that drafts professional, contextually appropriate replies.
+Analyze the incoming email and generate a suitable reply based on the email content and user context.
+
+Return a JSON object with:
+- actions: array with one reply action containing:
+  - type: "reply" or "draft_reply"
+  - title: Brief description of the reply
+  - payload: object with "to", "subject", "body" fields
+  - confidence: how confident this is a good reply (0.0-1.0)
+  - reasoning: why this reply is appropriate
+
+Guidelines for replies:
+- Be professional but friendly
+- Keep replies concise and to the point
+- Address the main points from the original email
+- Use appropriate tone (formal for business, casual for personal)
+- Include necessary action items or next steps
+- Don't make commitments the user hasn't authorized`
+
+  const userMessage = `Draft a reply for this email:
+
+User: ${user.display_name || user.email}
+
+Original Email:
+From: ${email.from}
+Subject: ${email.subject}
+Content: ${email.body || email.snippet || 'No content available'}
+
+User requested action: ${JSON.stringify(action)}
+
+Generate an appropriate reply that addresses the sender's needs while maintaining a professional tone.`
+
+  try {
+    const raw = await llm.chat([
+      {role: 'system', content: sys},
+      {role: 'user', content: userMessage}
+    ], {temperature: 0.4, max_tokens: 800, apiKey: opts.apiKey, model: opts.model})
+
+    const jsonText = extractJson(raw)
+    const parsed = JSON.parse(jsonText)
+    
+    return {
+      actions: parsed.actions || [],
+      followups: []
+    }
+  } catch (err) {
+    console.error('Failed to generate reply draft:', err)
+    return {
+      actions: [{
+        type: 'reply',
+        title: 'Draft reply (manual composition needed)',
+        payload: {
+          to: email.from,
+          subject: `Re: ${email.subject || ''}`,
+          body: 'Thank you for your email. I will review this and get back to you soon.\n\nBest regards'
+        },
+        confidence: 0.5,
+        reasoning: 'Generated fallback reply due to processing error'
+      }],
+      followups: []
+    }
+  }
+}
+
+// Generate meeting proposal with time suggestions
+async function generateMeetingProposal(user, email, action, opts, calendarBusy) {
+  const sys = `You are a calendar assistant that creates meeting proposals based on email content.
+Analyze the email and generate appropriate meeting details.
+
+IMPORTANT TIMEZONE HANDLING:
+- User timezone is: ${user.timezone || 'UTC'}
+- All times must be calculated in the user's timezone
+- When suggesting meeting times, use the user's local business hours
+- Generate start/end times as ISO strings in the user's timezone
+
+Return a JSON object with:
+- actions: array with one meeting action containing:
+  - type: "create_event" or "create_meeting"  
+  - title: Meeting title/purpose
+  - payload: object with meeting details
+  - confidence: how confident this meeting is appropriate (0.0-1.0)
+  - reasoning: why this meeting is suggested
+
+Meeting payload should include:
+- title/summary: Clear meeting purpose
+- description: Meeting agenda/notes
+- start: ISO datetime string in user's timezone (${user.timezone || 'UTC'})
+- end: ISO datetime string in user's timezone (${user.timezone || 'UTC'})
+- attendees: array of email addresses
+
+Guidelines:
+- Suggest meetings within business hours (9 AM - 6 PM) in user's timezone (${user.timezone || 'UTC'})
+- Default to 30-60 minute duration based on context
+- Avoid scheduling conflicts if calendar data provided
+- Include relevant context from the original email
+- If user mentions specific times (like "9 AM"), interpret as ${user.timezone || 'UTC'} time`
+
+  const calendarContext = calendarBusy && calendarBusy.length > 0 
+    ? `\nUser's busy times in next 3 days: ${JSON.stringify(calendarBusy)}`
+    : '\nNo calendar conflicts data available'
+
+  const userMessage = `Create a meeting proposal for this email:
+
+User: ${user.display_name || user.email}
+User Timezone: ${user.timezone || 'UTC'}
+Current Time: ${new Date().toLocaleString('en-US', { timeZone: user.timezone || 'UTC' })}
+
+Original Email:
+From: ${email.from}
+Subject: ${email.subject}
+Content: ${email.body || email.snippet || 'No content available'}
+
+User requested action: ${JSON.stringify(action)}${calendarContext}
+
+Generate appropriate meeting details including suggested time slots in ${user.timezone || 'UTC'} timezone.`
+
+  try {
+    const raw = await llm.chat([
+      {role: 'system', content: sys},
+      {role: 'user', content: userMessage}
+    ], {temperature: 0.3, max_tokens: 600, apiKey: opts.apiKey, model: opts.model})
+
+    const jsonText = extractJson(raw)
+    const parsed = JSON.parse(jsonText)
+    
+    return {
+      actions: parsed.actions || [],
+      followups: []
+    }
+  } catch (err) {
+    console.error('Failed to generate meeting proposal:', err)
+    
+    // Generate fallback meeting
+    const tomorrow = new Date()
+    tomorrow.setDate(tomorrow.getDate() + 1)
+    tomorrow.setHours(14, 0, 0, 0) // 2 PM tomorrow
+    
+    const endTime = new Date(tomorrow)
+    endTime.setHours(15, 0, 0, 0) // 1 hour duration
+    
+    const senderEmail = (email.from.match(/<(.+)>/) || [null, email.from])[1] || email.from
+    
+    return {
+      actions: [{
+        type: 'create_event',
+        title: `Meeting with ${email.from}`,
+        payload: {
+          title: `Meeting regarding: ${email.subject || 'Email discussion'}`,
+          description: `Meeting to discuss email from ${email.from}.\n\nOriginal email subject: ${email.subject}`,
+          start: tomorrow.toISOString(),
+          end: endTime.toISOString(),
+          attendees: [senderEmail]
+        },
+        confidence: 0.6,
+        reasoning: 'Generated fallback meeting proposal'
+      }],
+      followups: []
+    }
+  }
+}
+
+// ============= MEETING REQUIREMENTS PARSER =============
+
+async function parseMeetingRequirements(user, meetingText, opts = {}) {
+  const context = { user, meetingText, type: 'meeting_parsing' }
+  
+  const sys = `You are an intelligent meeting scheduler that analyzes user input and extracts structured meeting information.
+
+CRITICAL: You must respond with ONLY valid JSON. Do not include any explanations, markdown formatting, or additional text.
+
+IMPORTANT TIMEZONE HANDLING:
+- User's timezone is: ${user.timezone || 'UTC'}
+- All times must be interpreted and calculated in the user's timezone
+- Return times in ISO 8601 format with proper timezone handling
+
+Parse the user's meeting request and return a JSON object with EXACTLY this structure:
+{
+  "success": true,
+  "title": "Meeting title",
+  "description": "Detailed meeting description", 
+  "start_time": "2025-11-22T08:00:00.000Z",
+  "end_time": "2025-11-22T09:00:00.000Z",
+  "duration_minutes": 60,
+  "location": "Physical location or video link",
+  "attendees": ["email1@example.com", "email2@example.com"],
+  "recurring": {
+    "enabled": false,
+    "frequency": "weekly|daily|monthly",
+    "interval": 1,
+    "end_date": "2025-12-22T00:00:00.000Z",
+    "occurrences": 10
+  },
+  "reminders": [
+    {"method": "email", "minutes": 15},
+    {"method": "popup", "minutes": 10}
+  ],
+  "priority": "high|normal|low",
+  "visibility": "public|private",
+  "notes": "Additional meeting notes"
+}
+
+PARSING RULES:
+1. DATES & TIMES:
+   - "tomorrow" = next day in user's timezone
+   - "next week" = same day next week
+   - "8am", "2:30pm" = times in user's timezone
+   - "Monday at 3pm" = next Monday at 3pm
+   - Default duration: 60 minutes if not specified
+
+2. RECURRING MEETINGS:
+   - "weekly team standup" = weekly recurring
+   - "daily check-in" = daily recurring  
+   - "monthly review" = monthly recurring
+   - "every Tuesday at 2pm" = weekly on Tuesday
+
+3. ATTENDEES:
+   - Extract email addresses from text
+   - "with john@company.com" = add to attendees
+   - "team meeting" = may need attendee list
+
+4. LOCATION:
+   - "zoom meeting" = virtual
+   - "conference room A" = physical location
+   - "meet.google.com/abc" = video link
+
+5. PRIORITY & REMINDERS:
+   - "urgent meeting" = high priority
+   - "quick chat" = normal priority, shorter duration
+   - "important presentation" = high priority, longer duration
+
+EXAMPLES:
+Input: "every thursday 9 to 9.30am"
+Output: {"success":true,"title":"Weekly Thursday Meeting","start_time":"2025-11-21T09:00:00.000Z","end_time":"2025-11-21T09:30:00.000Z","duration_minutes":30,"recurring":{"enabled":true,"frequency":"weekly","interval":1}}
+
+Input: "team standup tomorrow 10am"  
+Output: {"success":true,"title":"Team Standup","start_time":"2025-11-22T10:00:00.000Z","end_time":"2025-11-22T11:00:00.000Z","duration_minutes":60,"recurring":{"enabled":false}}
+
+CRITICAL RULES:
+- ALWAYS return valid JSON only
+- NO explanations or extra text
+- Use ISO 8601 format for all times
+- If parsing fails, return: {"success": false, "error": "reason"}
+
+User timezone: ${user.timezone || 'UTC'}
+Current date: ${new Date().toISOString()}
+
+Parse this meeting request and return ONLY JSON: "${meetingText}"`
+
+  const usr = `Meeting request: "${meetingText}"`
+
+  try {
+    const messages = [
+      { role: 'system', content: sys },
+      { role: 'user', content: usr }
+    ]
+    
+    const result = await llm.chat(messages, opts)
+    console.log(`🤖 LLM meeting parsing result (length: ${result?.length || 0}):`, JSON.stringify(result))
+    
+    // Validate and parse the JSON response
+    if (!result || typeof result !== 'string' || result.trim().length === 0) {
+      console.error(`❌ Invalid LLM response - Type: ${typeof result}, Length: ${result?.length || 0}`)
+      return { success: false, error: 'Empty or invalid response from LLM' }
+    }
+    
+    // Clean up the response (remove any markdown formatting, extra whitespace)
+    let cleanResult = result.trim()
+    
+    // Remove markdown code blocks if present
+    if (cleanResult.startsWith('```json')) {
+      cleanResult = cleanResult.replace(/^```json\s*/, '').replace(/\s*```$/, '')
+    } else if (cleanResult.startsWith('```')) {
+      cleanResult = cleanResult.replace(/^```\s*/, '').replace(/\s*```$/, '')
+    }
+    
+    try {
+      const parsedResult = JSON.parse(cleanResult)
+      
+      // Validate that we have the expected structure
+      if (typeof parsedResult === 'object' && parsedResult !== null) {
+        // Ensure we have at least a success field
+        if (!parsedResult.hasOwnProperty('success')) {
+          parsedResult.success = true // Assume success if we got valid JSON
+        }
+        
+        // For successful parsing, ensure we have minimum required fields
+        if (parsedResult.success) {
+          // Add default values for missing required fields
+          if (!parsedResult.title) {
+            parsedResult.title = 'Meeting' // Default title
+          }
+          
+          // Validate time fields if present
+          if (parsedResult.start_time && !parsedResult.end_time) {
+            // Generate end time if start time is provided but not end time
+            const startDate = new Date(parsedResult.start_time)
+            const duration = parsedResult.duration_minutes || 60
+            const endDate = new Date(startDate.getTime() + duration * 60 * 1000)
+            parsedResult.end_time = endDate.toISOString()
+          }
+          
+          console.log(`✅ LLM parsing successful with title: "${parsedResult.title}"`)
+        }
+        
+        return parsedResult
+      } else {
+        console.error(`❌ LLM returned non-object JSON:`, parsedResult)
+        return { success: false, error: 'Invalid JSON structure from LLM' }
+      }
+    } catch (jsonError) {
+      console.error(`❌ JSON parsing failed. Raw response: "${cleanResult}"`)
+      console.error(`❌ JSON error:`, jsonError.message)
+      return { success: false, error: `Failed to parse LLM response as JSON: ${jsonError.message}` }
+    }
+  } catch (error) {
+    console.error('Error parsing meeting requirements:', error)
+    return { success: false, error: error.message }
+  }
+}
+
 module.exports = { 
   processEmail,           // Legacy compatibility
   processLLMRequest,      // New generic processor
   detectProcessorType,    // Intelligent processor detection
   processEmailActions,
+  parseMeetingRequirements, // New meeting parser
   processEmailSummary,
   processDailyBriefing,
   processMeetingNotes,
-  processChatResponse
+  processChatResponse,
+  followupActionOnEmail   // For prepare requests
 }

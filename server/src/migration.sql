@@ -307,6 +307,14 @@ COMMENT ON TABLE chat_sessions IS 'Persistent chat sessions for user conversatio
 COMMENT ON TABLE chat_messages IS 'Individual messages within chat sessions with context tracking';
 COMMENT ON COLUMN chat_messages.context_relevant IS 'Whether this message should be included in LLM context for future responses';
 
+-- Add profile personalization columns to users table
+ALTER TABLE users ADD COLUMN IF NOT EXISTS location TEXT;
+ALTER TABLE users ADD COLUMN IF NOT EXISTS personal_note TEXT;
+
+-- Add comments for new columns
+COMMENT ON COLUMN users.location IS 'User location for personalized assistance';
+COMMENT ON COLUMN users.personal_note IS 'Personal note for LLM to understand user context and preferences';
+
 -- Notes:
 -- 1) Using IF NOT EXISTS and a transaction makes repeated runs safe on restarts.
 -- 2) This file contains the complete schema consolidated from all migration files.
