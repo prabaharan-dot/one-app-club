@@ -318,14 +318,18 @@ router.post('/execute-action', async (req, res) => {
       const meetingData = action.payload
       
       try {
-        // Get user's Google OAuth tokens
+        // Get user's Google OAuth tokens (use 'gmail' platform like other routes)
         const integrationRes = await db.query(
-          'SELECT oauth_token_encrypted FROM integrations WHERE user_id = $1 AND platform = $2',
-          [userId, 'google']
+          'SELECT oauth_token_encrypted FROM integrations WHERE user_id = $1 AND platform = $2 AND enabled = true',
+          [userId, 'gmail']
         )
 
         if (integrationRes.rowCount === 0) {
-          return res.status(400).json({ error: 'google_not_connected' })
+          console.error(`❌ No Google integration found for user ${userId}`)
+          return res.status(400).json({ 
+            error: 'google_not_connected',
+            message: 'Please connect your Google Calendar first. Go to Settings → Integrations to connect your Google account.'
+          })
         }
 
         const tokens = JSON.parse(integrationRes.rows[0].oauth_token_encrypted.toString())
@@ -369,8 +373,17 @@ router.post('/execute-action', async (req, res) => {
           let rrule = `FREQ=${frequency};INTERVAL=${interval}`
           
           if (meetingData.recurring.end_date) {
-            const endDate = new Date(meetingData.recurring.end_date).toISOString().replace(/[-:]/g, '').split('.')[0] + 'Z'
-            rrule += `;UNTIL=${endDate}`
+            // Format the end date properly: YYYYMMDDTHHMMSSZ
+            const endDate = new Date(meetingData.recurring.end_date)
+            const formattedEndDate = endDate.getUTCFullYear().toString() +
+              (endDate.getUTCMonth() + 1).toString().padStart(2, '0') +
+              endDate.getUTCDate().toString().padStart(2, '0') +
+              'T' +
+              endDate.getUTCHours().toString().padStart(2, '0') +
+              endDate.getUTCMinutes().toString().padStart(2, '0') +
+              endDate.getUTCSeconds().toString().padStart(2, '0') +
+              'Z'
+            rrule += `;UNTIL=${formattedEndDate}`
           } else if (meetingData.recurring.occurrences) {
             rrule += `;COUNT=${meetingData.recurring.occurrences}`
           }
