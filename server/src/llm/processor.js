@@ -18,7 +18,8 @@ const processors = {
   'daily_briefing': processDailyBriefing,
   'meeting_notes': processMeetingNotes,
   'chat_response': processChatResponse,
-  'parse_meeting': parseMeetingRequirements
+  'parse_meeting': parseMeetingRequirements,
+  'create_meeting': processChatMeetingCreation
 }
 
 // Context collectors for different processor types
@@ -79,6 +80,11 @@ const contextCollectors = {
   'parse_meeting': async (user, params) => {
     const { meetingText } = params
     return { user, meetingText, type: 'meeting_parsing' }
+  },
+
+  'create_meeting': async (user, params) => {
+    const { message, context = {} } = params
+    return { user, message, context, type: 'chat_meeting_creation' }
   },
   
   'chat_response': async (user, params) => {
@@ -794,12 +800,23 @@ async function cacheBriefing(userId, briefingData) {
 async function detectProcessorType(message, user) {
   try {
     const sys = `You are an intelligent router that determines what type of request a user is making.
+
+IMPORTANT: If the user mentions creating, scheduling, booking, planning, or setting up ANY meeting/event/appointment/call, return "create_meeting".
+
 Based on the user's message, return ONLY one of these processor types:
 - email_actions: User wants to take action on specific emails (reply, flag, delete, etc.)
 - email_summary: User wants a summary of their emails (today, yesterday, this week, etc.)
 - daily_briefing: User wants a comprehensive daily overview/briefing/prep for their day
 - meeting_notes: User wants to process meeting notes or transcripts
-- chat_response: General questions, casual chat, or anything else
+- create_meeting: User wants to create, schedule, book, plan, or set up a new meeting/appointment/event/call (including recurring meetings, time-based requests like "every Thursday", "at 2pm", "tomorrow at 9am")
+- chat_response: General questions, casual chat, or anything else that doesn't involve creating meetings
+
+Examples that should return "create_meeting":
+- "schedule a meeting tomorrow at 2pm"
+- "create a meeting every thursday 9 to 9.30am"
+- "book a call next week"
+- "set up weekly standup"
+- "plan team meeting"
 
 Return ONLY the processor type, no explanation.`
 
@@ -819,23 +836,46 @@ What type of request is this? Return only the processor type.`
     console.log("processor detected "+ detectedType)
     
     // Validate the detected type
-    const validTypes = ['email_actions', 'email_summary', 'daily_briefing', 'meeting_notes', 'chat_response']
+    const validTypes = ['email_actions', 'email_summary', 'daily_briefing', 'meeting_notes', 'create_meeting', 'chat_response']
     if (validTypes.includes(detectedType)) {
       return detectedType
     }
     
     // Fallback pattern matching if AI fails
+    console.log(`⚠️ LLM detection returned invalid type "${detectedType}", using fallback patterns`)
     return fallbackProcessorDetection(message)
     
   } catch (err) {
     console.error('AI processor detection failed:', err.message)
     return fallbackProcessorDetection(message)
   }
+  
+  // Additional fallback check - if LLM returned chat_response but message contains meeting keywords, override to create_meeting
+  if (detectedType === 'chat_response') {
+    const fallbackType = fallbackProcessorDetection(message)
+    if (fallbackType === 'create_meeting') {
+      console.log(`🔄 Overriding LLM detection: chat_response -> create_meeting`)
+      return 'create_meeting'
+    }
+  }
 }
 
 function fallbackProcessorDetection(message) {
   const msg = message.toLowerCase().trim()
+  console.log(`🔍 Fallback pattern matching for: "${msg}"`)
   
+  // Meeting creation patterns
+  if (msg.match(/\b(create|schedule|set up|add|book|plan).*\b(meeting|appointment|event|call|session)\b/i) ||
+      msg.match(/\b(meeting|appointment|event|call).*\b(tomorrow|today|next week|monday|tuesday|wednesday|thursday|friday|saturday|sunday)\b/i) ||
+      msg.match(/\b(let'?s meet|can we meet|schedule.*time|book.*time|set.*time)\b/i) ||
+      msg.match(/\bevery.*(monday|tuesday|wednesday|thursday|friday|saturday|sunday)/i) ||
+      msg.match(/\b(weekly|daily|monthly).*\b(meeting|standup|check-in|review)\b/i) ||
+      msg.match(/\bat\s+\d+/i) || // "at 2pm", "at 9:30am"
+      msg.match(/\b\d+\s*(am|pm|:\d+)/i)) { // "2pm", "9:30am"
+    console.log(`✅ Meeting creation pattern matched!`)
+    return 'create_meeting'
+  }
+
   // Email summary patterns
   if (msg.match(/\b(summarize?|summary|overview|digest)\b.*\b(email|mail|message)s?\b/i) ||
       msg.match(/\b(today'?s?|yesterday'?s?|this week'?s?)\s+(email|mail|message)s?\b/i) ||
@@ -1071,6 +1111,76 @@ Generate appropriate meeting details including suggested time slots in ${user.ti
 
 // ============= MEETING REQUIREMENTS PARSER =============
 
+async function processChatMeetingCreation(context, opts = {}) {
+  const { user, message } = context
+  
+  console.log(`📅 Processing chat meeting creation request: "${message}"`)
+  
+  try {
+    // First, use LLM to parse the meeting requirements from the chat message
+    const meetingParsing = await parseMeetingRequirements(user, message, opts)
+    
+    if (meetingParsing && meetingParsing.success) {
+      console.log(`✅ Successfully parsed meeting from chat:`, meetingParsing)
+      
+      // Return the response in a format that includes meeting creation actions
+      return {
+        type: 'create_meeting',
+        success: true,
+        response: `I'll help you create that meeting! Here are the details I understood:
+        
+**Meeting: ${meetingParsing.title || 'New Meeting'}**
+${meetingParsing.description ? `- Description: ${meetingParsing.description}` : ''}
+${meetingParsing.start_time ? `- Start: ${new Date(meetingParsing.start_time).toLocaleString('en-US', { timeZone: user.timezone || 'UTC' })}` : ''}
+${meetingParsing.end_time ? `- End: ${new Date(meetingParsing.end_time).toLocaleString('en-US', { timeZone: user.timezone || 'UTC' })}` : ''}
+${meetingParsing.location ? `- Location: ${meetingParsing.location}` : ''}
+${meetingParsing.recurring?.enabled ? `- Recurring: ${meetingParsing.recurring.frequency || 'weekly'}` : ''}
+
+Would you like me to create this meeting in your Google Calendar?`,
+        actions: [{
+          type: 'create_calendar_event',
+          title: `Create Meeting: ${meetingParsing.title || 'New Meeting'}`,
+          payload: meetingParsing,
+          confidence: 0.9,
+          reasoning: 'User requested meeting creation through chat'
+        }],
+        meetingData: meetingParsing,
+        followups: []
+      }
+    } else {
+      // If LLM parsing failed, return a helpful response with basic meeting creation
+      console.log(`⚠️ LLM parsing failed, offering basic meeting creation`)
+      
+      return {
+        type: 'create_meeting',
+        success: true,
+        response: `I'd be happy to help you create a meeting! I understood you want to schedule something, but I need a few more details.
+
+Could you provide:
+- Meeting title
+- Date and time (e.g., "tomorrow at 2pm", "next Monday at 9:30am")
+- Duration (optional, defaults to 1 hour)
+- Attendees (optional)
+- Location or meeting link (optional)
+
+For example: "Schedule team standup every Tuesday at 9am" or "Book client call tomorrow 3-4pm with john@company.com"`,
+        actions: [],
+        followups: ['What would you like to call this meeting?', 'When should the meeting be scheduled?']
+      }
+    }
+  } catch (error) {
+    console.error('Chat meeting creation error:', error)
+    return {
+      type: 'create_meeting',
+      success: false,
+      response: 'I encountered an issue while trying to create your meeting. Could you try rephrasing your request?',
+      error: error.message,
+      actions: [],
+      followups: ['Try: "Schedule meeting tomorrow at 2pm"', 'Try: "Create weekly standup every Monday at 9am"']
+    }
+  }
+}
+
 async function parseMeetingRequirements(user, meetingText, opts = {}) {
   const context = { user, meetingText, type: 'meeting_parsing' }
   
@@ -1234,6 +1344,7 @@ module.exports = {
   detectProcessorType,    // Intelligent processor detection
   processEmailActions,
   parseMeetingRequirements, // New meeting parser
+  processChatMeetingCreation, // Chat meeting creation
   processEmailSummary,
   processDailyBriefing,
   processMeetingNotes,

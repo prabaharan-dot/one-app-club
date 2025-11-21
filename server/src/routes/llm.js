@@ -291,4 +291,140 @@ router.post('/debug-chat', async (req, res) => {
   }
 })
 
+// POST /api/llm/execute-action - Execute action from chat response
+router.post('/execute-action', async (req, res) => {
+  try {
+    const userId = req.session && req.session.userId
+    if (!userId) return res.status(401).json({ error: 'not_logged_in' })
+
+    const { action } = req.body
+    if (!action || !action.type) return res.status(400).json({ error: 'missing_action' })
+
+    console.log(`🎯 Executing chat action: ${action.type}`)
+
+    // Get user data  
+    const userRes = await db.query('SELECT * FROM users WHERE id = $1', [userId])
+    if (userRes.rowCount === 0) return res.status(404).json({ error: 'user_not_found' })
+    const user = userRes.rows[0]
+
+    if (action.type === 'create_calendar_event') {
+      // Import the googleapis library (same approach as messages route)
+      const { google } = require('googleapis')
+      
+      if (!action.payload) {
+        return res.status(400).json({ error: 'missing_meeting_payload' })
+      }
+
+      const meetingData = action.payload
+      
+      try {
+        // Get user's Google OAuth tokens
+        const integrationRes = await db.query(
+          'SELECT oauth_token_encrypted FROM integrations WHERE user_id = $1 AND platform = $2',
+          [userId, 'google']
+        )
+
+        if (integrationRes.rowCount === 0) {
+          return res.status(400).json({ error: 'google_not_connected' })
+        }
+
+        const tokens = JSON.parse(integrationRes.rows[0].oauth_token_encrypted.toString())
+        
+        // Create OAuth2 client and calendar service (same as messages route)
+        const oauth2Client = new google.auth.OAuth2(
+          process.env.GOOGLE_CLIENT_ID, 
+          process.env.GOOGLE_CLIENT_SECRET
+        )
+        oauth2Client.setCredentials(tokens)
+        const calendar = google.calendar({ version: 'v3', auth: oauth2Client })
+
+        // Build the calendar event
+        const eventPayload = {
+          summary: meetingData.title || 'Meeting',
+          description: meetingData.description || meetingData.notes || '',
+          start: {
+            dateTime: meetingData.start_time,
+            timeZone: user.timezone || 'UTC'
+          },
+          end: {
+            dateTime: meetingData.end_time || new Date(new Date(meetingData.start_time).getTime() + 60 * 60 * 1000).toISOString(),
+            timeZone: user.timezone || 'UTC'
+          }
+        }
+
+        // Add location if provided
+        if (meetingData.location) {
+          eventPayload.location = meetingData.location
+        }
+
+        // Add attendees if provided
+        if (meetingData.attendees && meetingData.attendees.length > 0) {
+          eventPayload.attendees = meetingData.attendees.map(email => ({ email }))
+        }
+
+        // Add recurrence if specified
+        if (meetingData.recurring && meetingData.recurring.enabled) {
+          const frequency = (meetingData.recurring.frequency || 'weekly').toUpperCase()
+          const interval = meetingData.recurring.interval || 1
+          let rrule = `FREQ=${frequency};INTERVAL=${interval}`
+          
+          if (meetingData.recurring.end_date) {
+            const endDate = new Date(meetingData.recurring.end_date).toISOString().replace(/[-:]/g, '').split('.')[0] + 'Z'
+            rrule += `;UNTIL=${endDate}`
+          } else if (meetingData.recurring.occurrences) {
+            rrule += `;COUNT=${meetingData.recurring.occurrences}`
+          }
+          
+          eventPayload.recurrence = [rrule]
+        }
+
+        // Add reminders if specified
+        if (meetingData.reminders && meetingData.reminders.length > 0) {
+          eventPayload.reminders = {
+            useDefault: false,
+            overrides: meetingData.reminders.map(reminder => ({
+              method: reminder.method || 'email',
+              minutes: reminder.minutes || 15
+            }))
+          }
+        }
+
+        console.log(`📅 Creating calendar event:`, eventPayload)
+        const result = await calendar.events.insert({
+          calendarId: 'primary',
+          resource: eventPayload
+        })
+
+        console.log(`✅ Meeting created successfully: ${result.data.id}`)
+        
+        res.json({
+          success: true,
+          message: 'Meeting created successfully in your Google Calendar!',
+          event: {
+            id: result.data.id,
+            title: eventPayload.summary,
+            start: eventPayload.start.dateTime,
+            end: eventPayload.end.dateTime,
+            link: result.data.htmlLink
+          }
+        })
+
+      } catch (error) {
+        console.error('Calendar creation error:', error)
+        res.status(500).json({ 
+          error: 'calendar_creation_failed', 
+          message: 'Failed to create calendar event: ' + error.message 
+        })
+      }
+
+    } else {
+      res.status(400).json({ error: 'unsupported_action_type', actionType: action.type })
+    }
+
+  } catch (err) {
+    console.error('Execute action error:', err)
+    res.status(500).json({ error: 'execution_failed', message: err.message })
+  }
+})
+
 module.exports = router

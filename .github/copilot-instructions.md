@@ -345,3 +345,6 @@ SELECT * FROM message_actions WHERE user_id = 'user-uuid' ORDER BY created_at DE
 ```
 
 Remember: This is a user-centric system where every action, message, and integration belongs to a specific user. Always validate user context and maintain data isolation.
+
+# CRITICAL
+never modify env file, environment variables. dont execute any tests or commands.

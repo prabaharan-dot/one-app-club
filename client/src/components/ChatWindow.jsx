@@ -723,6 +723,38 @@ ${summaryData.summary_text || aiResponse}${priorityText}${recommendationsText}${
         }
         
         aiResponse = briefingText
+      } else if (detectedType === 'create_meeting') {
+        // Handle meeting creation responses with actions
+        if (json.response.actions && json.response.actions.length > 0) {
+          // Display the AI response
+          setTimeout(async ()=>{
+            setMessages(m=>[...m,{
+              id:Date.now(),
+              from:'ai',
+              text:aiResponse,
+              type: detectedType || 'chat_response',
+              data: summaryData
+            }])
+            
+            // Add action buttons for meeting creation
+            setTimeout(() => {
+              const actions = json.response.actions
+              for(const action of actions) {
+                setMessages(m=>[...m,{
+                  id:Date.now()+Math.random(),
+                  from:'ai',
+                  text:`📅 **${action.title}**\n\nReady to create this meeting?`,
+                  chatAction: action,
+                  showChatActionButton: true
+                }])
+              }
+            }, 300)
+            
+            // Save AI response to database
+            await saveMessage('assistant', aiResponse, detectedType || 'chat_response', summaryData || {})
+          }, 400)
+          return // Don't continue with the normal flow
+        }
       } else if (detectedType && detectedType !== 'chat_response') {
         // Add detected type info for debugging (optional)
         aiResponse = `🤖 *Detected: ${detectedType.replace('_', ' ')}*\n\n${aiResponse}`
@@ -753,6 +785,70 @@ ${summaryData.summary_text || aiResponse}${priorityText}${recommendationsText}${
         // Save error message to database
         await saveMessage('assistant', errorMsg, 'error_response', { error: e.message })
       }, 400)
+    }
+  }
+
+  // Function to execute chat-based actions (like creating meetings from chat)
+  async function executeChatAction(action) {
+    try {
+      const base = window.location.hostname === 'localhost' ? 'http://localhost:4000' : ''
+      setMessages(m=>[...m,{id:Date.now(), from:'ai', text:`⏳ ${action.type === 'create_calendar_event' ? 'Creating your meeting...' : 'Executing action...'}`}])
+      
+      const res = await fetch(`${base}/api/llm/execute-action`, {
+        method: 'POST',
+        credentials: 'include',
+        headers: {'Content-Type': 'application/json'},
+        body: JSON.stringify({ action })
+      })
+      
+      if (!res.ok) {
+        if(res.status === 403) {
+          const errorData = await res.json()
+          if(errorData.error === 'insufficient_permissions') {
+            setMessages(m=>[...m,{
+              id:Date.now(), 
+              from:'ai', 
+              text:`🔐 **Permission Required**\n\n${errorData.message}\n\nTo create meetings, you need to grant additional Google Calendar permissions.`,
+              needsReauth: true,
+              reauthUrl: errorData.reauthUrl,
+              actionType: 'create_meeting',
+              requiredPermission: errorData.requiredPermission
+            }])
+            return {error: 'insufficient_permissions'}
+          }
+        } else if(res.status === 400) {
+          
+          const errorData = await res.json()
+          console.error(errorData)
+          if(errorData.error === 'google_not_connected') {
+            setMessages(m=>[...m,{
+              id:Date.now(), 
+              from:'ai', 
+              text:`🔗 **Google Calendar Not Connected**\n\nTo create meetings, you need to connect your Google Calendar first. Please go to Settings → Integrations to connect your Google account.`
+            }])
+            return {error: 'google_not_connected'}
+          }
+        }
+        throw new Error(`HTTP ${res.status}`)
+      }
+      
+      const result = await res.json()
+      
+      if (result.success) {
+        let successText = '✅ Action completed successfully!'
+        if (action.type === 'create_calendar_event') {
+          successText = `📅 **Meeting Created Successfully!**\n\n**${result.event.title}**\n📅 ${new Date(result.event.start).toLocaleString()}\n🔗 [View in Calendar](${result.event.link})`
+        }
+        setMessages(m=>[...m,{id:Date.now(), from:'ai', text:successText}])
+      } else {
+        throw new Error(result.message || 'Action failed')
+      }
+      
+      return result
+    } catch(e) {
+      console.error('Chat action execution error:', e)
+      setMessages(m=>[...m,{id:Date.now(), from:'ai', text:`❌ Action failed: ${e.message}`}])
+      throw e
     }
   }
 
@@ -863,6 +959,25 @@ ${summaryData.summary_text || aiResponse}${priorityText}${recommendationsText}${
               {m.suggestedAction && (
                 <div style={{marginTop:8,display:'flex',gap:8}}>
                   <button onClick={()=>confirmSuggestedAction(m.messageId || m.suggestedAction.messageId, m.suggestedAction)} style={{padding:'6px 8px',borderRadius:8,border:'1px solid rgba(0,0,0,0.06)'}}>Confirm {m.suggestedAction.type}</button>
+                </div>
+              )}
+
+              {/* render chat action buttons (from direct chat meeting creation) */}
+              {m.showChatActionButton && m.chatAction && (
+                <div style={{marginTop:8,display:'flex',gap:8}}>
+                  <button 
+                    onClick={()=>executeChatAction(m.chatAction)} 
+                    style={{
+                      padding:'8px 12px',
+                      borderRadius:8,
+                      border:'1px solid #007bff',
+                      backgroundColor:'#007bff',
+                      color:'white',
+                      cursor:'pointer'
+                    }}
+                  >
+                    📅 Create Meeting
+                  </button>
                 </div>
               )}
 
