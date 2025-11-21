@@ -151,16 +151,23 @@ class LLMProcessingJob {
         throw new Error(result.error)
       }
 
-      // Store the suggested actions
-      const actions = result.actions || []
+      // Store the enhanced email analysis and suggested actions
+      const actions = result.suggested_actions || result.actions || []
       if (actions.length > 0) {
-        await this.storeMessageActions(message.id, message.user_id, actions)
+        // Store the complete analysis result including summary, priority, etc.
+        await this.storeMessageActions(message.id, message.user_id, result)
         
-        // Mark message as requiring action
-        await db.query(
-          'UPDATE messages SET action_required = true WHERE id = $1',
-          [message.id]
-        )
+        // Mark message as requiring action based on priority level
+        const requiresAction = result.priority_level === 'high' || 
+                              actions.some(action => action.confidence > 0.7) ||
+                              actions.some(action => ['create_task', 'create_event', 'draft_reply'].includes(action.type))
+        
+        if (requiresAction) {
+          await db.query(
+            'UPDATE messages SET action_required = true WHERE id = $1',
+            [message.id]
+          )
+        }
       }
 
       // Mark as successfully processed
@@ -204,14 +211,27 @@ class LLMProcessingJob {
     `, [messageId, success, error])
   }
 
-  async storeMessageActions(messageId, userId, actions) {
+  async storeMessageActions(messageId, userId, analysisResult) {
     try {
+      // Store the complete analysis result including summary, priority, and actions
+      const dataToStore = {
+        summary: analysisResult.summary,
+        priority_level: analysisResult.priority_level,
+        category: analysisResult.category,
+        sentiment: analysisResult.sentiment,
+        suggested_actions: analysisResult.suggested_actions || analysisResult.actions || [],
+        analysis_timestamp: analysisResult.analysis_timestamp || new Date().toISOString(),
+        email_id: analysisResult.email_id
+      }
+      
       await db.query(`
         INSERT INTO message_actions (message_id, user_id, suggested_actions, created_at)
         VALUES ($1, $2, $3, now())
         ON CONFLICT (message_id, user_id) 
         DO UPDATE SET suggested_actions = EXCLUDED.suggested_actions, created_at = now()
-      `, [messageId, userId, JSON.stringify(actions)])
+      `, [messageId, userId, JSON.stringify(dataToStore)])
+      
+      console.log(`Stored enhanced analysis for message ${messageId}: ${analysisResult.priority_level} priority, ${(analysisResult.suggested_actions || []).length} actions`)
     } catch (err) {
       console.error('Error storing message actions:', err)
       throw err

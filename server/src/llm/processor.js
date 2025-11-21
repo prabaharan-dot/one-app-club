@@ -4,7 +4,7 @@ const db = require('../db')
 /*
  Generic LLM Processor for One App Club
  Supports multiple processor types:
- - email_actions: Suggest actions for emails
+ - email_actions: Analyze emails and suggest actionable next steps with summaries
  - email_summary: Summarize emails for a time period
  - daily_briefing: Complete daily overview
  - meeting_notes: Process meeting transcripts
@@ -207,37 +207,147 @@ async function processEmailActions(context, opts) {
   const { user, email } = context
   const prefs = user.preferences || {}
   
-  const sys = `You are an assistant that decides programmatic actions for incoming emails based on a user's preferences.
-Return a JSON object with an "actions" array. Allowed action types: flag, create_task, create_event, reply, mark_read, set_priority.
-Do not include explanation or text outside the JSON. Each action should include only fields necessary for execution.`
+  const sys = `You are an intelligent email assistant that analyzes emails and provides actionable summaries and suggestions.
+Analyze the email content, determine its importance, intent, and suggest the most appropriate actions for the user.
+
+Return a JSON object with:
+- summary: 2-3 sentence summary of the email content and intent
+- priority_level: "high", "medium", or "low" based on urgency and importance
+- category: email type like "meeting_request", "task_assignment", "newsletter", "personal", "promotional", "urgent_request", etc.
+- sentiment: "positive", "neutral", "negative", or "urgent"
+- suggested_actions: array of 1-3 most relevant actions with details
+
+Available action types:
+- mark_as_priority: Mark email as high priority
+- flag_as_spam: Flag as spam/unwanted
+- create_event: Create calendar event (include title, start_time, duration)
+- create_task: Create a task (include title, description, due_date)
+- mark_as_read: Mark as read (for low-priority items)
+- draft_reply: Suggest a reply (include reply_type, tone, key_points)
+- archive: Archive the email
+- forward: Forward to someone (include reason)
+
+Each action should include:
+- type: action type
+- title: human-readable action description
+- confidence: how confident you are this action is appropriate (0.0-1.0)
+- reasoning: brief explanation why this action is suggested
+- payload: action-specific data (event details, task info, reply content, etc.)
+
+Be selective - only suggest actions that truly make sense for this email.`
 
   const userMessage = `
-User preferences: ${JSON.stringify(prefs)}
-Email:
-- id: ${email.id || ''}
-- from: ${email.from || ''}
-- subject: ${email.subject || ''}
-- snippet: ${email.snippet || ''}
-- body: ${email.body ? email.body.slice(0, 4000) : ''}
-Decide what automated actions should be taken now. Consider:
-- If sender is in high_priority_senders list mark priority.
-- If content implies an immediate task create_task with title and notes.
-- If content implies scheduling create_event with approximate times (ISO).
-- If reply is simple canned ack include reply action.
-Return strict JSON only.`
+Analyze this email for user: ${user.display_name || user.email}
+
+User Preferences: ${JSON.stringify(prefs)}
+
+Email Details:
+- ID: ${email.id || 'N/A'}
+- From: ${email.from || 'Unknown sender'}
+- Subject: ${email.subject || 'No subject'}
+- Snippet: ${email.snippet || 'No preview available'}
+- Content: ${email.body ? email.body.slice(0, 3000) : 'No body content'}
+
+Consider the following when analyzing:
+1. Is this sender in the user's high_priority_senders list?
+2. Does the content suggest urgency (deadlines, ASAP, urgent keywords)?
+3. Does it contain meeting/event information that needs scheduling?
+4. Does it assign tasks or request actions from the user?
+5. Is it promotional/newsletter content that might be archived?
+6. Does it require a response or acknowledgment?
+7. Is it spam or suspicious content?
+
+Provide comprehensive analysis with actionable suggestions that help the user manage their inbox efficiently.
+
+Return strict JSON format only.`
 
   const raw = await llm.chat([
     {role: 'system', content: sys},
     {role: 'user', content: userMessage}
-  ], {temperature: 0, apiKey: opts.apiKey, model: opts.model})
+  ], {temperature: 0.3, max_tokens: 1000, apiKey: opts.apiKey, model: opts.model})
 
-  const jsonText = extractJson(raw)
-  const parsed = JSON.parse(jsonText)
-  
-  return {
-    type: 'actions',
-    actions: parsed.actions || [],
-    email_id: email.id
+  try {
+    const jsonText = extractJson(raw)
+    const parsed = JSON.parse(jsonText)
+    
+    // Validate and enhance the response
+    const enhancedResponse = {
+      type: 'email_actions',
+      email_id: email.id,
+      summary: parsed.summary || `Email from ${email.from} about ${email.subject}`,
+      priority_level: parsed.priority_level || 'medium',
+      category: parsed.category || 'general',
+      sentiment: parsed.sentiment || 'neutral',
+      suggested_actions: [],
+      analysis_timestamp: new Date().toISOString()
+    }
+    
+    // Process and validate suggested actions
+    if (parsed.suggested_actions && Array.isArray(parsed.suggested_actions)) {
+      enhancedResponse.suggested_actions = parsed.suggested_actions.map(action => ({
+        type: action.type || 'mark_as_read',
+        title: action.title || `${action.type} action`,
+        confidence: Math.min(Math.max(action.confidence || 0.5, 0.0), 1.0),
+        reasoning: action.reasoning || 'Automated suggestion',
+        payload: action.payload || {},
+        actionable: true,
+        estimated_time: action.estimated_time || '1 minute'
+      })).slice(0, 3) // Limit to 3 actions max
+    }
+    
+    // If no actions suggested, provide default based on priority
+    if (enhancedResponse.suggested_actions.length === 0) {
+      const defaultAction = enhancedResponse.priority_level === 'high' 
+        ? {
+            type: 'mark_as_priority',
+            title: 'Mark as high priority',
+            confidence: 0.7,
+            reasoning: 'Email appears to be important based on content analysis',
+            payload: { priority: 'high' },
+            actionable: true,
+            estimated_time: '1 minute'
+          }
+        : {
+            type: 'mark_as_read',
+            title: 'Mark as read',
+            confidence: 0.6,
+            reasoning: 'Email appears to be informational',
+            payload: {},
+            actionable: true,
+            estimated_time: '30 seconds'
+          }
+      
+      enhancedResponse.suggested_actions = [defaultAction]
+    }
+    
+    return enhancedResponse
+    
+  } catch (err) {
+    console.error('Failed to parse email actions JSON:', err.message)
+    console.error('Raw LLM response:', raw)
+    
+    // Return fallback response with basic analysis
+    return {
+      type: 'email_actions',
+      email_id: email.id,
+      summary: `Email from ${email.from} regarding "${email.subject}". Content analysis failed, manual review recommended.`,
+      priority_level: 'medium',
+      category: 'general',
+      sentiment: 'neutral',
+      suggested_actions: [
+        {
+          type: 'mark_as_read',
+          title: 'Mark as read',
+          confidence: 0.5,
+          reasoning: 'Default action due to analysis failure',
+          payload: {},
+          actionable: true,
+          estimated_time: '30 seconds'
+        }
+      ],
+      analysis_timestamp: new Date().toISOString(),
+      analysis_error: 'LLM response parsing failed'
+    }
   }
 }
 

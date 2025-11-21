@@ -93,6 +93,9 @@ CREATE TABLE IF NOT EXISTS message_actions (
   acted BOOLEAN DEFAULT false
 );
 
+-- Add unique constraint for ON CONFLICT to work
+CREATE UNIQUE INDEX IF NOT EXISTS idx_message_actions_unique_message_user ON message_actions(message_id, user_id);
+
 CREATE INDEX IF NOT EXISTS idx_message_actions_user ON message_actions(user_id);
 CREATE INDEX IF NOT EXISTS idx_message_actions_message ON message_actions(message_id);
 CREATE INDEX IF NOT EXISTS idx_message_actions_acted ON message_actions(user_id, acted) WHERE acted = false;
@@ -276,6 +279,7 @@ CREATE TRIGGER trigger_update_chat_session_timestamp
   EXECUTE FUNCTION update_chat_session_timestamp();
 
 -- Helper function to create initial chat message
+DROP FUNCTION IF EXISTS create_initial_chat_message(UUID, UUID);
 CREATE OR REPLACE FUNCTION create_initial_chat_message(p_session_id UUID, p_user_id UUID)
 RETURNS VOID AS $$
 BEGIN

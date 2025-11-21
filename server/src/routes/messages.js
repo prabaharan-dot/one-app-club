@@ -29,7 +29,28 @@ router.get('/pending', async (req, res) => {
     const itemsRes = await db.query(itemsQ, [userId])
 
     const items = itemsRes.rows.map(r=>{
-      const suggested = r.latest_suggested || r.action_suggested || null
+      // Parse the enhanced analysis data
+      let analysisData = null
+      let suggestedActions = []
+      
+      try {
+        const rawSuggested = r.latest_suggested || r.action_suggested || null
+        if (rawSuggested) {
+          analysisData = typeof rawSuggested === 'string' ? JSON.parse(rawSuggested) : rawSuggested
+          
+          // Handle both old and new data formats
+          if (analysisData.suggested_actions) {
+            // New enhanced format
+            suggestedActions = analysisData.suggested_actions
+          } else if (Array.isArray(analysisData)) {
+            // Old format - direct array of actions
+            suggestedActions = analysisData
+          }
+        }
+      } catch (err) {
+        console.error('Error parsing suggested actions for message', r.id, err)
+      }
+      
       return {
         id: r.id,
         external_message_id: r.external_message_id,
@@ -37,17 +58,29 @@ router.get('/pending', async (req, res) => {
         subject: r.subject,
         snippet: (r.body_plain && r.body_plain.substring(0,200)) || '',
         received_at: r.received_at,
-        suggested: suggested,
-        suggested_at: r.suggested_at
+        // Enhanced analysis data
+        summary: analysisData?.summary || null,
+        priority_level: analysisData?.priority_level || 'medium',
+        category: analysisData?.category || 'general',
+        sentiment: analysisData?.sentiment || 'neutral',
+        suggested: suggestedActions, // Array of action objects
+        suggested_at: r.suggested_at,
+        analysis_timestamp: analysisData?.analysis_timestamp || null
       }
     })
 
-    // compute immediate action count heuristically
+    // Compute immediate action count using enhanced confidence scores
     let immediateCount = 0
-    for(const it of items){
-      const s = it.suggested || []
-      if(Array.isArray(s)){
-        if(s.some(a=> a.type === 'create_task' || (a.type==='reply' && a.send) || a.type==='set_priority')) immediateCount++
+    for(const item of items){
+      const actions = item.suggested || []
+      if(Array.isArray(actions)){
+        // Count high-confidence or high-priority actions as immediate
+        const hasImmediate = actions.some(action => 
+          action.confidence > 0.7 || 
+          ['create_task', 'create_event', 'draft_reply', 'mark_as_priority'].includes(action.type) ||
+          item.priority_level === 'high'
+        )
+        if (hasImmediate) immediateCount++
       }
     }
 
