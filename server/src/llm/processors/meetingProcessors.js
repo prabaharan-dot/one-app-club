@@ -36,7 +36,12 @@ Rules:
 - Location is optional`;
 
   try {
-    const response = await llmClient.chat(systemPrompt, input, {
+    const messages = [
+      { role: 'system', content: systemPrompt },
+      { role: 'user', content: input }
+    ];
+    
+    const response = await llmClient.chat(messages, {
       apiKey: options.apiKey,
       model: options.model
     });

@@ -159,7 +159,12 @@ Additional context: ${JSON.stringify({
 What processor type should handle this request?`;
 
     try {
-      const response = await this.llmClient.chat(systemPrompt, userPrompt, {
+      const messages = [
+        { role: 'system', content: systemPrompt },
+        { role: 'user', content: userPrompt }
+      ];
+      
+      const response = await this.llmClient.chat(messages, {
         apiKey: options.apiKey,
         model: options.model || 'gpt-4o-mini',
         temperature: 0.1, // Low temperature for consistent classification

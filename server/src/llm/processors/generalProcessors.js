@@ -21,7 +21,12 @@ Provide helpful, concise responses. If the user is asking about:
 Keep responses conversational and actionable.`;
 
   try {
-    const response = await llmClient.chat(systemPrompt, input, {
+    const messages = [
+      { role: 'system', content: systemPrompt },
+      { role: 'user', content: input }
+    ];
+    
+    const response = await llmClient.chat(messages, {
       apiKey: options.apiKey,
       model: options.model
     });
@@ -66,7 +71,12 @@ Rules:
 - Choose appropriate category`;
 
   try {
-    const response = await llmClient.chat(systemPrompt, input, {
+    const messages = [
+      { role: 'system', content: systemPrompt },
+      { role: 'user', content: input }
+    ];
+    
+    const response = await llmClient.chat(messages, {
       apiKey: options.apiKey,
       model: options.model
     });
@@ -107,7 +117,12 @@ Action types:
 - unknown: Cannot determine action`;
 
   try {
-    const response = await llmClient.chat(systemPrompt, input, {
+    const messages = [
+      { role: 'system', content: systemPrompt },
+      { role: 'user', content: input }
+    ];
+    
+    const response = await llmClient.chat(messages, {
       apiKey: options.apiKey,
       model: options.model
     });
@@ -162,7 +177,12 @@ Generate 2-4 relevant suggestions based on:
 Generate helpful suggestions.`;
 
   try {
-    const response = await llmClient.chat(systemPrompt, contextPrompt, {
+    const messages = [
+      { role: 'system', content: systemPrompt },
+      { role: 'user', content: contextPrompt }
+    ];
+    
+    const response = await llmClient.chat(messages, {
       apiKey: options.apiKey,
       model: options.model
     });

@@ -35,7 +35,12 @@ Content: ${emailData.body_plain}
 Analyze and suggest actions.`;
 
   try {
-    const response = await llmClient.chat(systemPrompt, userPrompt, {
+    const messages = [
+      { role: 'system', content: systemPrompt },
+      { role: 'user', content: userPrompt }
+    ];
+    
+    const response = await llmClient.chat(messages, {
       apiKey: options.apiKey,
       model: options.model
     });
@@ -74,7 +79,12 @@ User wants to: ${replyInstruction}
 Generate an appropriate reply.`;
 
   try {
-    const response = await llmClient.chat(systemPrompt, userPrompt, {
+    const messages = [
+      { role: 'system', content: systemPrompt },
+      { role: 'user', content: userPrompt }
+    ];
+    
+    const response = await llmClient.chat(messages, {
       apiKey: options.apiKey,
       model: options.model
     });
