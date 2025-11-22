@@ -76,7 +76,7 @@ router.get('/briefing', async (req, res) => {
 })
 
 // POST /api/llm/chat
-// Chat interaction endpoint
+// Chat interaction endpoint with task creation support
 router.post('/chat', async (req, res) => {
   try {
     const userId = req.session && req.session.userId
@@ -90,10 +90,42 @@ router.post('/chat', async (req, res) => {
     if (userRes.rowCount === 0) return res.status(404).json({ error: 'user_not_found' })
     const user = userRes.rows[0]
 
+    // Get user's LLM API key
+    let userApiKey = null;
+    try {
+      const settingsRes = await db.query('SELECT llm_key_encrypted FROM user_settings WHERE user_id = $1', [userId])
+      if (settingsRes.rows.length > 0 && settingsRes.rows[0].llm_key_encrypted) {
+        // In a real app, you'd decrypt this properly
+        userApiKey = settingsRes.rows[0].llm_key_encrypted.toString();
+      }
+    } catch (settingsErr) {
+      console.warn('Could not get user API key:', settingsErr.message);
+    }
+
+    // Prepare options with user's API key
+    const processingOptions = {
+      apiKey: userApiKey || process.env.OPENAI_API_KEY,
+      model: process.env.OPENAI_MODEL || 'gpt-4o-mini'
+    };
+
+    // Enhanced context with user info
+    const enhancedContext = {
+      ...context,
+      user: user
+    };
+
     // Process with intelligent processor detection (pass null or processorType)
-    const result = await llmProcessor.processLLMRequest(processorType, user, { message, context }, {})
+    const result = await llmProcessor.processLLMRequest(processorType, user, { 
+      message, 
+      context: enhancedContext 
+    }, processingOptions);
     
-    res.json({ success: true, response: result, detectedType: result.type })
+    res.json({ 
+      success: true, 
+      response: result, 
+      detectedType: result.processorType || result.type,
+      taskCreated: result.success || false 
+    });
   } catch (err) {
     console.error('Chat processing error:', err)
     res.status(500).json({ error: 'chat_failed', message: err.message })
@@ -115,15 +147,74 @@ router.post('/intelligent', async (req, res) => {
     if (userRes.rowCount === 0) return res.status(404).json({ error: 'user_not_found' })
     const user = userRes.rows[0]
 
+    // Get conversation history if sessionId is provided
+    let conversationHistory = []
+    if (sessionId) {
+      try {
+        const historyRes = await db.query(`
+          SELECT 
+            message_role,
+            content,
+            created_at
+          FROM chat_messages
+          WHERE session_id = $1 AND user_id = $2 AND context_relevant = TRUE
+          ORDER BY created_at DESC
+          LIMIT 10
+        `, [sessionId, userId])
+
+        // Format for LLM (reverse to chronological order)
+        conversationHistory = historyRes.rows
+          .reverse()
+          .map(msg => ({
+            role: msg.message_role === 'user' ? 'user' : 'assistant',
+            content: msg.content
+          }))
+
+        console.log(`Retrieved ${conversationHistory.length} conversation messages for session ${sessionId}`)
+      } catch (historyErr) {
+        console.warn('Could not retrieve conversation history:', historyErr.message)
+        // Continue without history rather than failing
+      }
+    }
+
+    // Enhanced context with conversation history
+    const enhancedContext = {
+      ...context,
+      user,
+      sessionId,
+      conversationHistory
+    }
+
+    // Get user's LLM API key for processing
+    let userApiKey = null;
+    try {
+      const settingsRes = await db.query('SELECT llm_key_encrypted FROM user_settings WHERE user_id = $1', [userId])
+      if (settingsRes.rows.length > 0 && settingsRes.rows[0].llm_key_encrypted) {
+        userApiKey = settingsRes.rows[0].llm_key_encrypted.toString();
+      }
+    } catch (settingsErr) {
+      console.warn('Could not get user API key:', settingsErr.message);
+    }
+
+    // Processing options with API key
+    const processingOptions = {
+      apiKey: userApiKey || process.env.OPENAI_API_KEY,
+      model: process.env.OPENAI_MODEL || 'gpt-4o-mini'
+    };
+
     // Always use intelligent detection (pass null for processor type)
-    const result = await llmProcessor.processLLMRequest(null, user, { message, context, sessionId }, {})
+    const result = await llmProcessor.processLLMRequest(null, user, { 
+      message, 
+      context: enhancedContext 
+    }, processingOptions)
     
     res.json({ 
       success: true, 
       response: result,
       detectedType: result.type,
       sessionId,
-      message: 'Intelligently processed your request'
+      conversationContext: conversationHistory.length,
+      message: 'Intelligently processed your request with conversation context'
     })
   } catch (err) {
     console.error('Intelligent processing error:', err)
@@ -427,6 +518,83 @@ router.post('/execute-action', async (req, res) => {
         res.status(500).json({ 
           error: 'calendar_creation_failed', 
           message: 'Failed to create calendar event: ' + error.message 
+        })
+      }
+
+    } else if (action.type === 'create_task') {
+      // Handle Google Tasks creation
+      const { google } = require('googleapis')
+      
+      if (!action.data) {
+        return res.status(400).json({ error: 'missing_task_data' })
+      }
+
+      const taskData = action.data
+      
+      try {
+        // Get user's Google OAuth tokens (same pattern as calendar)
+        const integrationRes = await db.query(
+          'SELECT oauth_token_encrypted FROM integrations WHERE user_id = $1 AND platform = $2 AND enabled = true',
+          [userId, 'gmail']
+        )
+
+        if (integrationRes.rowCount === 0) {
+          console.error(`❌ No Google integration found for user ${userId}`)
+          return res.status(400).json({ 
+            error: 'google_not_connected',
+            message: 'Please connect your Google account first. Go to Settings → Integrations to connect your Google account.'
+          })
+        }
+
+        const tokens = JSON.parse(integrationRes.rows[0].oauth_token_encrypted.toString())
+        
+        // Create OAuth2 client and Tasks service
+        const oauth2Client = new google.auth.OAuth2(
+          process.env.GOOGLE_CLIENT_ID, 
+          process.env.GOOGLE_CLIENT_SECRET
+        )
+        oauth2Client.setCredentials(tokens)
+        const tasks = google.tasks({ version: 'v1', auth: oauth2Client })
+
+        // Build the Google Task
+        const googleTask = {
+          title: taskData.title,
+          notes: taskData.description || '',
+        }
+
+        // Add due date if provided
+        if (taskData.due_date) {
+          const dueDate = new Date(taskData.due_date)
+          if (!isNaN(dueDate.getTime())) {
+            googleTask.due = dueDate.toISOString()
+          }
+        }
+
+        console.log(`📝 Creating Google Task:`, googleTask)
+        const result = await tasks.tasks.insert({
+          tasklist: '@default',
+          resource: googleTask
+        })
+
+        console.log(`✅ Task created successfully: ${result.data.id}`)
+        
+        res.json({
+          success: true,
+          message: 'Task created successfully in Google Tasks!',
+          task: {
+            id: result.data.id,
+            title: googleTask.title,
+            description: googleTask.notes,
+            due: googleTask.due,
+            status: result.data.status
+          }
+        })
+
+      } catch (error) {
+        console.error('Google Tasks creation error:', error)
+        res.status(500).json({ 
+          error: 'task_creation_failed', 
+          message: 'Failed to create Google Task: ' + error.message 
         })
       }
 

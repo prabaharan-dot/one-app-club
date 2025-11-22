@@ -137,6 +137,7 @@ Context information:
 - User has email integration: ${context.user ? 'yes' : 'no'}
 - Current time: ${new Date().toISOString()}
 - User timezone: ${context.user?.timezone || 'unknown'}
+- Has conversation history: ${context.conversationHistory?.length > 0 ? 'yes' : 'no'}
 
 Examples:
 - "schedule a meeting tomorrow at 2pm" → create_meeting
@@ -146,14 +147,24 @@ Examples:
 - "what's the weather today?" → general_chat
 - "help me reply to this email" → email_actions
 
+When analyzing follow-up messages, consider the conversation history to understand context and intent.
+
 Return ONLY the processor type (one word), nothing else.`;
 
-    const userPrompt = `User input: "${input}"
+    // Build conversation context for classification
+    let conversationContext = '';
+    if (context.conversationHistory && context.conversationHistory.length > 0) {
+      conversationContext = '\n\nRecent conversation:\n' + 
+        context.conversationHistory.slice(-3).map(msg => `${msg.role}: ${msg.content.substring(0, 100)}...`).join('\n');
+    }
+
+    const userPrompt = `User input: "${input}"${conversationContext}
 
 Additional context: ${JSON.stringify({
       hasEmailContext: !!(context.emailData || context.messageId),
       userDisplayName: context.user?.displayName,
-      timeOfDay: new Date().getHours() < 12 ? 'morning' : new Date().getHours() < 17 ? 'afternoon' : 'evening'
+      timeOfDay: new Date().getHours() < 12 ? 'morning' : new Date().getHours() < 17 ? 'afternoon' : 'evening',
+      conversationLength: context.conversationHistory?.length || 0
     })}
 
 What processor type should handle this request?`;
@@ -211,7 +222,7 @@ What processor type should handle this request?`;
    */
   async processMeetingRequest(input, context, options) {
     try {
-      const meetingData = await processChatMeetingCreation(input, {
+      const meetingData = await processChatMeetingCreation(input, context, {
         llmClient: this.llmClient,
         ...options
       });
@@ -240,26 +251,50 @@ What processor type should handle this request?`;
    */
   async processTaskRequest(input, context, options) {
     try {
-      const taskData = await processTaskCreation(input, {
+      const taskData = await processTaskCreation(input, context, {
         llmClient: this.llmClient,
+        user: context.user,
+        db: this.db,
         ...options
       });
 
-      return {
-        type: 'create_task',
-        content: `I can help you create this task: "${taskData.title}"`,
-        data: taskData,
-        actions: [{
+      // Generate appropriate response based on whether task was actually created
+      let content, actions = [];
+      
+      if (taskData.created) {
+        content = `✅ Task created successfully in Google Tasks: "${taskData.title}"`;
+        if (taskData.googleTaskId) {
+          content += `\n📝 Task ID: ${taskData.googleTaskId}`;
+        }
+      } else if (taskData.created === false && taskData.reason) {
+        content = `📋 I've parsed your task: "${taskData.title}"\n⚠️ ${taskData.reason}`;
+        actions = [{
+          type: 'setup_integration',
+          label: 'Setup Google Tasks',
+          description: 'Connect Google Tasks to create tasks automatically'
+        }];
+      } else {
+        content = `📋 I can help you create this task: "${taskData.title}"`;
+        actions = [{
           type: 'create_task',
           label: 'Create Task',
           data: taskData
-        }]
+        }];
+      }
+
+      return {
+        type: 'create_task',
+        content,
+        data: taskData,
+        actions,
+        success: taskData.created || false
       };
     } catch (error) {
       console.error('processTaskRequest error:', error);
       return {
         type: 'error',
-        content: 'I had trouble understanding the task details. Could you provide more information?'
+        content: 'I had trouble understanding the task details. Could you provide more specific information like task title and any due date?',
+        error: error.message
       };
     }
   }

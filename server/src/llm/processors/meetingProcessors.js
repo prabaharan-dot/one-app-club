@@ -7,7 +7,7 @@ const { extractJson } = require('../utils/jsonUtils');
 /**
  * Process chat input for meeting creation
  */
-async function processChatMeetingCreation(input, options = {}) {
+async function processChatMeetingCreation(input, context, options = {}) {
   const { llmClient } = options;
 
   const systemPrompt = `You are a calendar assistant. Parse meeting requests from natural language.
@@ -33,13 +33,21 @@ Rules:
 - For recurring: include recurrence object
 - For one-time: omit recurrence
 - Always use 24-hour format
-- Location is optional`;
+- Location is optional
+- Use conversation history to gather complete meeting details`;
 
   try {
-    const messages = [
-      { role: 'system', content: systemPrompt },
-      { role: 'user', content: input }
-    ];
+    // Build messages array with conversation history for better context
+    const messages = [{ role: 'system', content: systemPrompt }];
+
+    // Include recent conversation history for context (last 3 messages)
+    if (context?.conversationHistory && context.conversationHistory.length > 0) {
+      const recentHistory = context.conversationHistory.slice(-3);
+      messages.push(...recentHistory);
+    }
+
+    // Add current user input
+    messages.push({ role: 'user', content: input });
     
     const response = await llmClient.chat(messages, {
       apiKey: options.apiKey,

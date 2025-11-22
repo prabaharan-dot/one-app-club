@@ -18,13 +18,21 @@ Provide helpful, concise responses. If the user is asking about:
 - Tasks: Suggest task creation or management
 - General questions: Provide helpful information
 
-Keep responses conversational and actionable.`;
+Keep responses conversational and actionable. Use the conversation history to maintain context and provide relevant follow-up responses.`;
 
   try {
-    const messages = [
-      { role: 'system', content: systemPrompt },
-      { role: 'user', content: input }
-    ];
+    // Build messages array with conversation history
+    const messages = [{ role: 'system', content: systemPrompt }];
+
+    // Include conversation history for context
+    if (context.conversationHistory && context.conversationHistory.length > 0) {
+      // Add recent conversation history (last 5 messages to keep context manageable)
+      const recentHistory = context.conversationHistory.slice(-5);
+      messages.push(...recentHistory);
+    }
+
+    // Add current user input
+    messages.push({ role: 'user', content: input });
     
     const response = await llmClient.chat(messages, {
       apiKey: options.apiKey,
@@ -32,14 +40,16 @@ Keep responses conversational and actionable.`;
     });
 
     return {
-      type: 'general_response',
+      type: 'chat_response',
+      response: response,
       content: response,
       actions: []
     };
   } catch (error) {
     console.error('processGeneralChat error:', error);
     return {
-      type: 'general_response',
+      type: 'chat_response',
+      response: 'I apologize, but I encountered an error processing your request. Please try again.',
       content: 'I apologize, but I encountered an error processing your request. Please try again.',
       actions: []
     };
@@ -47,10 +57,53 @@ Keep responses conversational and actionable.`;
 }
 
 /**
- * Process task creation requests
+ * Create task in Google Tasks API
  */
-async function processTaskCreation(input, options = {}) {
-  const { llmClient } = options;
+async function createGoogleTask(taskData, googleAuth, options = {}) {
+  try {
+    const { google } = require('googleapis');
+    const tasks = google.tasks({ version: 'v1', auth: googleAuth });
+
+    // Prepare task for Google Tasks API
+    const googleTask = {
+      title: taskData.title,
+      notes: taskData.description || '',
+    };
+
+    // Add due date if provided
+    if (taskData.due_date) {
+      const dueDate = new Date(taskData.due_date);
+      if (!isNaN(dueDate.getTime())) {
+        // Google Tasks expects RFC 3339 timestamp
+        googleTask.due = dueDate.toISOString();
+      }
+    }
+
+    // Create task in default task list
+    const result = await tasks.tasks.insert({
+      tasklist: '@default',
+      resource: googleTask
+    });
+
+    console.log('✅ Google Task created:', result.data.id);
+    
+    return {
+      success: true,
+      taskId: result.data.id,
+      title: result.data.title,
+      googleTask: result.data
+    };
+  } catch (error) {
+    console.error('❌ Google Tasks API error:', error);
+    throw new Error(`Failed to create Google Task: ${error.message}`);
+  }
+}
+
+/**
+ * Process task creation requests and create in Google Tasks
+ */
+async function processTaskCreation(input, context, options = {}) {
+  const { llmClient, user, db } = options;
 
   const systemPrompt = `You are a task management assistant. Parse task creation requests from natural language.
 
@@ -68,13 +121,21 @@ Rules:
 - Description can be more detailed
 - Due date only if mentioned or implied
 - Default priority is medium
-- Choose appropriate category`;
+- Choose appropriate category
+- Use conversation history to gather complete task details`;
 
   try {
-    const messages = [
-      { role: 'system', content: systemPrompt },
-      { role: 'user', content: input }
-    ];
+    // Build messages array with conversation history for better context
+    const messages = [{ role: 'system', content: systemPrompt }];
+
+    // Include recent conversation history for context (last 3 messages)
+    if (context?.conversationHistory && context.conversationHistory.length > 0) {
+      const recentHistory = context.conversationHistory.slice(-3);
+      messages.push(...recentHistory);
+    }
+
+    // Add current user input
+    messages.push({ role: 'user', content: input });
     
     const response = await llmClient.chat(messages, {
       apiKey: options.apiKey,
@@ -84,6 +145,51 @@ Rules:
     const result = extractJson(response);
     if (!result || !result.title) {
       throw new Error('Invalid task data extracted');
+    }
+
+    // If user and db are provided, try to create the task in Google Tasks
+    if (user && db) {
+      try {
+        // Get user's Google integration (use same pattern as calendar integration)
+        const integrationRes = await db.query(
+          'SELECT oauth_token_encrypted FROM integrations WHERE user_id = $1 AND platform = $2 AND enabled = true',
+          [user.id, 'gmail']
+        );
+
+        if (integrationRes.rows.length > 0) {
+          // Parse the stored OAuth tokens
+          const tokens = JSON.parse(integrationRes.rows[0].oauth_token_encrypted.toString());
+          
+          // Create Google Auth with proper client credentials (same as calendar code)
+          const { google } = require('googleapis');
+          const oauth2Client = new google.auth.OAuth2(
+            process.env.GOOGLE_CLIENT_ID,
+            process.env.GOOGLE_CLIENT_SECRET
+          );
+          
+          // Set the user's credentials
+          oauth2Client.setCredentials(tokens);
+
+          // Create the task in Google Tasks
+          const googleTaskResult = await createGoogleTask(result, oauth2Client, options);
+          
+          // Add Google task info to result
+          result.googleTaskId = googleTaskResult.taskId;
+          result.created = true;
+          result.platform = 'google_tasks';
+        } else {
+          console.warn('No Google integration found for user, task parsed but not created');
+          result.created = false;
+          result.reason = 'No Google Tasks integration';
+        }
+      } catch (googleError) {
+        console.error('Failed to create Google Task, returning parsed data:', googleError);
+        result.created = false;
+        result.error = googleError.message;
+      }
+    } else {
+      result.created = false;
+      result.reason = 'No user context provided';
     }
 
     return result;
@@ -254,6 +360,7 @@ function analyzeTextSentiment(text) {
 module.exports = {
   processGeneralChat,
   processTaskCreation,
+  createGoogleTask,
   processQuickAction,
   generateSmartSuggestions,
   analyzeTextSentiment
