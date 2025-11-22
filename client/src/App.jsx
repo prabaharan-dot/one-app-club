@@ -3,6 +3,8 @@ import SidebarWidget from './components/SidebarWidget'
 import ChatWindow from './components/ChatWindow'
 import CalendarPane from './components/CalendarPane'
 import SignIn from './components/SignIn'
+import NotificationPanel from './components/NotificationPanel'
+import PersonalizationPanel from './components/PersonalizationPanel'
 import api from './api'
 
 export default function App() {
@@ -16,6 +18,22 @@ export default function App() {
 
   return (
     <div className="app-root">
+      {/* Top Right Corner Panels */}
+      {user && (
+        <div style={{
+          position: 'fixed',
+          top: '16px',
+          right: '16px',
+          zIndex: 1000,
+          display: 'flex',
+          gap: '12px',
+          alignItems: 'center'
+        }}>
+          <PersonalizationPanel />
+          <NotificationPanel />
+        </div>
+      )}
+      
       <SidebarWidget />
       {!user ? <div style={{display:'flex',alignItems:'center',justifyContent:'center',height:'80vh'}}><SignIn /></div> : <ChatWindow />}
       <CalendarPane />

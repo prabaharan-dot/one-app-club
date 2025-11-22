@@ -1,9 +1,11 @@
 import React, { useState, useRef, useEffect } from 'react'
+import ReactMarkdown from 'react-markdown'
+import { monitorOAuthPopup, openOAuthPopup } from '../utils/oauth'
 
 export default function ChatWindow(){
   const [messages, setMessages] = useState([])
   const [text, setText] = useState('')
-  const [focusedSuggest, setFocusedSuggest] = useState(null) // 'recent' | 'important' | 'brief' | null
+  const [focusedSuggest, setFocusedSuggest] = useState(null) // 'unread' | 'important' | 'brief' | null
   const [currentSessionId, setCurrentSessionId] = useState(null)
   const [sessionLoading, setSessionLoading] = useState(true)
   const bodyRef = useRef()
@@ -13,6 +15,88 @@ export default function ChatWindow(){
   // Initialize session on component mount
   useEffect(() => {
     initializeSession()
+    
+    // Check for auth-related URL parameters
+    const urlParams = new URLSearchParams(window.location.search)
+    
+    if (urlParams.get('reauth') === 'success') {
+      setTimeout(() => {
+        setMessages(m=>[...m,{
+          id:Date.now(), 
+          from:'ai', 
+          text:'✅ **Permissions Updated Successfully!**\n\nYour Google permissions have been refreshed. You can now use all email management features including:\n• Mark emails as read\n• Delete emails\n• Send replies\n• Create calendar meetings\n• Create tasks\n\nTry using the email action buttons again!'
+        }])
+        
+        // Trigger permission check update for notification panel
+        window.dispatchEvent(new CustomEvent('permissionsUpdated'))
+      }, 1000)
+      
+      // Clean up URL
+      window.history.replaceState({}, document.title, window.location.pathname)
+    }
+    
+    if (urlParams.get('signup') === 'success') {
+      setTimeout(() => {
+        setMessages(m=>[...m,{
+          id:Date.now(), 
+          from:'ai', 
+          text:'🎉 **Welcome to One App Club!**\n\nYour account has been created successfully with full permissions! You can now:\n\n• **Manage emails** - Mark as read, delete, draft AI-powered replies\n• **Schedule meetings** - Create calendar events with email senders\n• **Create tasks** - Turn emails into actionable items\n• **Get summaries** - AI-powered email insights and daily briefings\n\nTry clicking "📬 all unread" below to get started!'
+        }])
+      }, 1000)
+      
+      // Clean up URL
+      window.history.replaceState({}, document.title, window.location.pathname)
+    }
+    
+    if (urlParams.get('signup') === 'incomplete_permissions') {
+      setTimeout(() => {
+        setMessages(m=>[...m,{
+          id:Date.now(), 
+          from:'ai', 
+          text:'⚠️ **Setup Incomplete**\n\nYour account was created, but some Google permissions are missing. This means some features won\'t work properly.\n\n**Missing features may include:**\n• Email management (mark as read, delete)\n• Sending replies\n• Creating calendar meetings\n• Creating tasks\n\nWould you like to complete the setup now?',
+          needsReauth: true,
+          reauthUrl: '/api/auth/onboard',
+          actionType: 'complete_setup',
+          requiredPermission: 'all Google services'
+        }])
+      }, 1000)
+      
+      // Clean up URL
+      window.history.replaceState({}, document.title, window.location.pathname)
+    }
+    
+    if (urlParams.get('onboard') === 'success') {
+      setTimeout(() => {
+        setMessages(m=>[...m,{
+          id:Date.now(), 
+          from:'ai', 
+          text:'🎉 **Setup Complete!**\n\nAll Google permissions have been granted successfully. You now have access to all One App Club features!\n\nTry using the email management tools below to get started.'
+        }])
+        
+        // Trigger permission check update for notification panel
+        window.dispatchEvent(new CustomEvent('permissionsUpdated'))
+      }, 1000)
+      
+      // Clean up URL
+      window.history.replaceState({}, document.title, window.location.pathname)
+    }
+    
+    if (urlParams.get('onboard') === 'incomplete') {
+      setTimeout(() => {
+        setMessages(m=>[...m,{
+          id:Date.now(), 
+          from:'ai', 
+          text:'❌ **Setup Still Incomplete**\n\nSome required permissions are still missing. Please ensure you grant access to:\n• Gmail (read, send, modify)\n• Google Calendar\n• Google Tasks\n\nTry the setup process again or contact support if you continue to have issues.',
+          needsReauth: true,
+          reauthUrl: '/api/auth/onboard',
+          actionType: 'retry_setup',
+          requiredPermission: 'all Google services'
+        }])
+      }, 1000)
+      
+      // Clean up URL
+      window.history.replaceState({}, document.title, window.location.pathname)
+    }
   }, [])
   
   // Initialize or load existing session
@@ -96,7 +180,7 @@ export default function ChatWindow(){
     }
   }
 
-  // helper to load pending messages and stream them into the chat
+  // helper to load pending messages and stream them into the chat with enhanced action buttons
   async function loadPendingMessages(){
     try{
       const base = window.location.hostname === 'localhost' ? 'http://localhost:4000' : ''
@@ -108,10 +192,20 @@ export default function ChatWindow(){
         setMessages(m=>[...m,{id:Date.now(), from:'ai', text:'No pending messages needing action.'}])
         return
       }
+      
+      setMessages(m=>[...m,{id:Date.now(), from:'ai', text:`Found ${items.length} unread messages. Here they are with action options:`}])
+      
       for(const it of items.reverse()){
-        const summary = `From: ${it.sender} • ${it.subject}`
+        const snippet = it.snippet ? ` - ${it.snippet.substring(0, 100)}${it.snippet.length > 100 ? '...' : ''}` : ''
+        const summary = `📧 **From:** ${it.sender}\n**Subject:** ${it.subject}${snippet}`
         await new Promise(r=>setTimeout(r, 500))
-        setMessages(m=>[...m,{id:Date.now()+Math.random(), from:'ai', text:summary, messageData: it}])
+        setMessages(m=>[...m,{
+          id:Date.now()+Math.random(), 
+          from:'ai', 
+          text:summary, 
+          messageData: it,
+          showActions: true
+        }])
       }
     }catch(e){
       setMessages(m=>[...m,{id:Date.now(), from:'ai', text:'Failed to load pending messages.'}])
@@ -130,6 +224,49 @@ export default function ChatWindow(){
       window.removeEventListener('showDailyBriefing', handleDailyBriefing)
     }
   },[])
+
+  // helper to load all unread emails with full action buttons
+  async function loadAllUnreadEmails(){
+    try{
+      const base = window.location.hostname === 'localhost' ? 'http://localhost:4000' : ''
+      const res = await fetch(`${base}/api/messages/unread`, {credentials:'include'})
+      if(!res.ok) {
+        console.error('Failed to fetch unread messages:', res.status, res.statusText)
+        setMessages(m=>[...m,{id:Date.now(), from:'ai', text:'❌ Failed to load unread messages. Please check your connection.'}])
+        return
+      }
+      const json = await res.json()
+      const items = json.items || []
+      const totalUnread = json.total_unread || 0
+      
+      if(items.length === 0 && totalUnread === 0){
+        setMessages(m=>[...m,{id:Date.now(), from:'ai', text:'📬 No unread messages found. Your inbox is clean!'}])
+        return
+      } else if(items.length === 0 && totalUnread > 0) {
+        setMessages(m=>[...m,{id:Date.now(), from:'ai', text:`📬 You have ${totalUnread} unread messages, but they haven't been processed yet. Try running the Gmail polling job or check back in a few minutes.`}])
+        return
+      }
+      
+      setMessages(m=>[...m,{id:Date.now(), from:'ai', text:`📬 **All Unread Emails** (${items.length} of ${totalUnread} total)\n\nHere are your unread messages with action options:`}])
+      
+      for(const it of items.reverse()){
+        const snippet = it.snippet ? ` - ${it.snippet.substring(0, 120)}${it.snippet.length > 120 ? '...' : ''}` : ''
+        const timeAgo = it.received_at ? new Date(it.received_at).toLocaleString() : ''
+        const summary = `📧 **From:** ${it.sender}\n**Subject:** ${it.subject}\n**Time:** ${timeAgo}${snippet}`
+        await new Promise(r=>setTimeout(r, 300))
+        setMessages(m=>[...m,{
+          id:Date.now()+Math.random(), 
+          from:'ai', 
+          text:summary, 
+          messageData: it,
+          showActions: true
+        }])
+      }
+    }catch(e){
+      console.error('Error loading unread messages:', e)
+      setMessages(m=>[...m,{id:Date.now(), from:'ai', text:'Failed to load unread messages. Please try again.'}])
+    }
+  }
 
   // helper to load "important" messages (heuristic filter)
   async function loadImportantMessages(){
@@ -151,9 +288,10 @@ export default function ChatWindow(){
       }
       setMessages(m=>[...m,{id:Date.now(), from:'ai', text:'Here are some messages I consider important:'}])
       for(const it of toShow.reverse()){
-        const summary = `From: ${it.sender} • ${it.subject}`
+        const snippet = it.snippet ? ` - ${it.snippet.substring(0, 100)}${it.snippet.length > 100 ? '...' : ''}` : ''
+        const summary = `📧 **From:** ${it.sender}\n**Subject:** ${it.subject}${snippet}`
         await new Promise(r=>setTimeout(r, 400))
-        setMessages(m=>[...m,{id:Date.now()+Math.random(), from:'ai', text:summary, messageData: it}])
+        setMessages(m=>[...m,{id:Date.now()+Math.random(), from:'ai', text:summary, messageData: it, showActions: true}])
       }
     }catch(e){
       setMessages(m=>[...m,{id:Date.now(), from:'ai', text:'Failed to load important messages.'}])
@@ -255,7 +393,7 @@ ${summaryData.summary_text || 'No additional insights available.'}`
     }
   }
 
-  // keyboard shortcuts: Alt+1 = recent, Alt+2 = important, Alt+3 = brief
+  // keyboard shortcuts: Alt+1 = all unread, Alt+2 = important, Alt+3 = brief, Alt+4 = recent pending
   useEffect(()=>{
     function onKey(e){
       // ignore when typing in input or textarea
@@ -266,13 +404,16 @@ ${summaryData.summary_text || 'No additional insights available.'}`
       if(!mod) return
       if(e.key === '1'){
         e.preventDefault()
-        loadPendingMessages()
+        loadAllUnreadEmails()
       } else if(e.key === '2'){
         e.preventDefault()
         loadImportantMessages()
       } else if(e.key === '3'){
         e.preventDefault()
         briefMe()
+      } else if(e.key === '4'){
+        e.preventDefault()
+        loadPendingMessages()
       }
     }
     window.addEventListener('keydown', onKey)
@@ -287,33 +428,93 @@ ${summaryData.summary_text || 'No additional insights available.'}`
       // immediate actions
       if(actionType === 'mark_read' || actionType === 'delete'){
         const res = await fetch(`${base}/api/messages/${messageId}/action`, {method:'POST', credentials:'include', headers:{'Content-Type':'application/json'}, body:JSON.stringify({actionType, payload})})
-        if(!res.ok) throw new Error('action_failed')
+        
+        if(!res.ok) {
+          if(res.status === 403) {
+            const errorData = await res.json()
+            if(errorData.error === 'insufficient_permissions') {
+              setMessages(m=>[...m,{
+                id:Date.now(), 
+                from:'ai', 
+                text:`🔐 **Permission Required**\n\n${errorData.message}\n\nTo enable this action, you need to grant additional Google permissions.`,
+                needsReauth: true,
+                reauthUrl: errorData.reauthUrl,
+                actionType: errorData.actionType,
+                requiredPermission: errorData.requiredPermission
+              }])
+              return {error: 'insufficient_permissions'}
+            }
+          }
+          throw new Error('action_failed')
+        }
+        
         const j = await res.json()
-        setMessages(m=>[...m,{id:Date.now(), from:'ai', text:`Action ${actionType} executed.`}])
+        setMessages(m=>[...m,{id:Date.now(), from:'ai', text:`✅ ${actionType === 'mark_read' ? 'Marked as read' : 'Deleted'} successfully.`}])
         return j
       }
 
-      // for other actions (create_event, create_task, reply, forward) first ask server to prepare using LLM
-      setMessages(m=>[...m,{id:Date.now(), from:'ai', text:'Okay, let me draft some suggestions...'}])
+      // for other actions (create_event, create_task, reply, forward, draft_reply, create_meeting) first ask server to prepare using LLM
+      if(actionType === 'draft_reply'){
+        setMessages(m=>[...m,{id:Date.now(), from:'ai', text:'🤖 Analyzing the email and drafting a reply...'}])
+      } else if(actionType === 'create_meeting'){
+        setMessages(m=>[...m,{id:Date.now(), from:'ai', text:'📅 Preparing meeting details...'}])
+      } else {
+        setMessages(m=>[...m,{id:Date.now(), from:'ai', text:'Okay, let me draft some suggestions...'}])
+      }
+      
       const prepRes = await fetch(`${base}/api/messages/${messageId}/prepare`, {method:'POST', credentials:'include', headers:{'Content-Type':'application/json'}, body:JSON.stringify({actionType, payload})})
-      if(!prepRes.ok) throw new Error('prepare_failed')
+      
+      if(!prepRes.ok) {
+        if(prepRes.status === 403) {
+          const errorData = await prepRes.json()
+          if(errorData.error === 'insufficient_permissions') {
+            setMessages(m=>[...m,{
+              id:Date.now(), 
+              from:'ai', 
+              text:`🔐 **Permission Required**\n\n${errorData.message}\n\nTo enable this action, you need to grant additional Google permissions.`,
+              needsReauth: true,
+              reauthUrl: errorData.reauthUrl,
+              actionType: errorData.actionType,
+              requiredPermission: errorData.requiredPermission
+            }])
+            return {error: 'insufficient_permissions'}
+          }
+        }
+        throw new Error('prepare_failed')
+      }
+      
       const prepJson = await prepRes.json()
       const actions = prepJson.actions || []
 
       if(actions.length===0){
-        setMessages(m=>[...m,{id:Date.now(), from:'ai', text:'I could not generate suggestions.'}])
+        if(actionType === 'create_meeting'){
+          setMessages(m=>[...m,{id:Date.now(), from:'ai', text:'I need more information to schedule a meeting. Please provide:\n• Preferred date and time\n• Meeting duration\n• Any specific agenda items\n\nType your response in the chat below.', needsInput: true, actionType: 'create_meeting', messageId}])
+        } else {
+          setMessages(m=>[...m,{id:Date.now(), from:'ai', text:'I could not generate suggestions.'}])
+        }
         return {actions: []}
       }
 
       // display suggested actions and present Confirm buttons
-      const assistantId = Date.now()+Math.random()
-      setMessages(m=>[...m,{id:assistantId, from:'ai', text:'Here are suggested options:'}])
+      if(actionType === 'draft_reply'){
+        setMessages(m=>[...m,{id:Date.now(), from:'ai', text:'📝 **Draft Reply Generated:**'}])
+      } else {
+        setMessages(m=>[...m,{id:Date.now(), from:'ai', text:'Here are suggested options:'}])
+      }
+      
       for(const act of actions){
-        setMessages(m=>[...m,{id:Date.now()+Math.random(), from:'ai', text: `${act.type}: ${act.title || act.summary || JSON.stringify(act.payload || act)}`, suggestedAction: act, messageId}])
+        let displayText = `${act.type}: ${act.title || act.summary || ''}`
+        if(act.payload && act.payload.body && actionType === 'draft_reply'){
+          displayText = `**To:** ${act.payload.to || 'sender'}\n**Subject:** ${act.payload.subject || 'Re: Original Subject'}\n\n${act.payload.body}`
+        }
+        setMessages(m=>[...m,{id:Date.now()+Math.random(), from:'ai', text: displayText, suggestedAction: act, messageId}])
       }
 
       // Append a small UI message with Confirm buttons by adding a message that contains all actions (rendered below)
-      setMessages(m=>[...m,{id:Date.now(), from:'ai', text:'Choose an option to confirm.', suggestedBatch: {messageId, actions}}])
+      const confirmText = actionType === 'draft_reply' ? 'Send this reply?' : 
+                         actionType === 'create_meeting' ? 'Create this meeting?' : 
+                         'Choose an option to confirm.'
+      setMessages(m=>[...m,{id:Date.now(), from:'ai', text:confirmText, suggestedBatch: {messageId, actions}}])
 
       return {actions}
     }catch(e){
@@ -327,9 +528,38 @@ ${summaryData.summary_text || 'No additional insights available.'}`
     try{
       const base = window.location.hostname === 'localhost' ? 'http://localhost:4000' : ''
       const res = await fetch(`${base}/api/messages/${messageId}/action`, {method:'POST', credentials:'include', headers:{'Content-Type':'application/json'}, body:JSON.stringify({actionType: action.type, payload: action.payload || action})})
-      if(!res.ok) throw new Error('execute_failed')
+      
+      if(!res.ok) {
+        if(res.status === 403) {
+          const errorData = await res.json()
+          if(errorData.error === 'insufficient_permissions') {
+            setMessages(m=>[...m,{
+              id:Date.now(), 
+              from:'ai', 
+              text:`🔐 **Permission Required**\n\n${errorData.message}\n\nTo enable this action, you need to grant additional Google permissions.`,
+              needsReauth: true,
+              reauthUrl: errorData.reauthUrl,
+              actionType: errorData.actionType,
+              requiredPermission: errorData.requiredPermission
+            }])
+            return {error: 'insufficient_permissions'}
+          }
+        }
+        throw new Error('execute_failed')
+      }
+      
       const j = await res.json()
-      setMessages(m=>[...m,{id:Date.now(), from:'ai', text:`Executed ${action.type}` }])
+      
+      let successText = `✅ Executed ${action.type}`
+      if(action.type === 'reply' || action.type === 'draft_reply'){
+        successText = '📧 Reply sent successfully!'
+      } else if(action.type === 'create_event' || action.type === 'create_meeting'){
+        successText = '📅 Meeting created successfully!'
+      } else if(action.type === 'create_task'){
+        successText = '✓ Task created successfully!'
+      }
+      
+      setMessages(m=>[...m,{id:Date.now(), from:'ai', text:successText}])
       return j
     }catch(e){
       setMessages(m=>[...m,{id:Date.now(), from:'ai', text:`Execution failed: ${e.message || e}` }])
@@ -343,6 +573,13 @@ ${summaryData.summary_text || 'No additional insights available.'}`
     const userText = text
     setMessages(m=>[...m,userMsg])
     setText('')
+    
+    // Check if this is a response to a meeting input request
+    const lastMessage = messages[messages.length - 1]
+    if(lastMessage && lastMessage.needsInput && lastMessage.actionType === 'create_meeting') {
+      await handleMeetingInput(lastMessage.messageId, userText)
+      return
+    }
     
     // Save user message to database
     await saveMessage('user', userText, 'chat_response')
@@ -486,6 +723,38 @@ ${summaryData.summary_text || aiResponse}${priorityText}${recommendationsText}${
         }
         
         aiResponse = briefingText
+      } else if (detectedType === 'create_meeting') {
+        // Handle meeting creation responses with actions
+        if (json.response.actions && json.response.actions.length > 0) {
+          // Display the AI response
+          setTimeout(async ()=>{
+            setMessages(m=>[...m,{
+              id:Date.now(),
+              from:'ai',
+              text:aiResponse,
+              type: detectedType || 'chat_response',
+              data: summaryData
+            }])
+            
+            // Add action buttons for meeting creation
+            setTimeout(() => {
+              const actions = json.response.actions
+              for(const action of actions) {
+                setMessages(m=>[...m,{
+                  id:Date.now()+Math.random(),
+                  from:'ai',
+                  text:`📅 **${action.title}**\n\nReady to create this meeting?`,
+                  chatAction: action,
+                  showChatActionButton: true
+                }])
+              }
+            }, 300)
+            
+            // Save AI response to database
+            await saveMessage('assistant', aiResponse, detectedType || 'chat_response', summaryData || {})
+          }, 400)
+          return // Don't continue with the normal flow
+        }
       } else if (detectedType && detectedType !== 'chat_response') {
         // Add detected type info for debugging (optional)
         aiResponse = `🤖 *Detected: ${detectedType.replace('_', ' ')}*\n\n${aiResponse}`
@@ -519,6 +788,117 @@ ${summaryData.summary_text || aiResponse}${priorityText}${recommendationsText}${
     }
   }
 
+  // Function to execute chat-based actions (like creating meetings from chat)
+  async function executeChatAction(action) {
+    try {
+      const base = window.location.hostname === 'localhost' ? 'http://localhost:4000' : ''
+      setMessages(m=>[...m,{id:Date.now(), from:'ai', text:`⏳ ${action.type === 'create_calendar_event' ? 'Creating your meeting...' : 'Executing action...'}`}])
+      
+      const res = await fetch(`${base}/api/llm/execute-action`, {
+        method: 'POST',
+        credentials: 'include',
+        headers: {'Content-Type': 'application/json'},
+        body: JSON.stringify({ action })
+      })
+      
+      if (!res.ok) {
+        if(res.status === 403) {
+          const errorData = await res.json()
+          if(errorData.error === 'insufficient_permissions') {
+            setMessages(m=>[...m,{
+              id:Date.now(), 
+              from:'ai', 
+              text:`🔐 **Permission Required**\n\n${errorData.message}\n\nTo create meetings, you need to grant additional Google Calendar permissions.`,
+              needsReauth: true,
+              reauthUrl: errorData.reauthUrl,
+              actionType: 'create_meeting',
+              requiredPermission: errorData.requiredPermission
+            }])
+            return {error: 'insufficient_permissions'}
+          }
+        } else if(res.status === 400) {
+          
+          const errorData = await res.json()
+          console.error(errorData)
+          if(errorData.error === 'google_not_connected') {
+            setMessages(m=>[...m,{
+              id:Date.now(), 
+              from:'ai', 
+              text:`🔗 **Google Calendar Not Connected**\n\nTo create meetings, you need to connect your Google Calendar first. Please go to Settings → Integrations to connect your Google account.`
+            }])
+            return {error: 'google_not_connected'}
+          }
+        }
+        throw new Error(`HTTP ${res.status}`)
+      }
+      
+      const result = await res.json()
+      
+      if (result.success) {
+        let successText = '✅ Action completed successfully!'
+        if (action.type === 'create_calendar_event') {
+          successText = `📅 **Meeting Created Successfully!**\n\n**${result.event.title}**\n📅 ${new Date(result.event.start).toLocaleString()}\n🔗 [View in Calendar](${result.event.link})`
+        }
+        setMessages(m=>[...m,{id:Date.now(), from:'ai', text:successText}])
+      } else {
+        throw new Error(result.message || 'Action failed')
+      }
+      
+      return result
+    } catch(e) {
+      console.error('Chat action execution error:', e)
+      setMessages(m=>[...m,{id:Date.now(), from:'ai', text:`❌ Action failed: ${e.message}`}])
+      throw e
+    }
+  }
+
+  // Function to handle meeting creation with user input
+  async function handleMeetingInput(messageId, userInput) {
+    try {
+      const base = window.location.hostname === 'localhost' ? 'http://localhost:4000' : ''
+      setMessages(m=>[...m,{id:Date.now(), from:'ai', text:'📅 Creating meeting with your details...'}])
+      
+      const res = await fetch(`${base}/api/messages/${messageId}/action`, {
+        method:'POST', 
+        credentials:'include', 
+        headers:{'Content-Type':'application/json'}, 
+        body:JSON.stringify({
+          actionType: 'create_meeting', 
+          payload: { 
+            userInput,
+            meetingDetails: userInput 
+          }
+        })
+      })
+      
+      if(!res.ok) {
+        if(res.status === 403) {
+          const errorData = await res.json()
+          if(errorData.error === 'insufficient_permissions') {
+            setMessages(m=>[...m,{
+              id:Date.now(), 
+              from:'ai', 
+              text:`🔐 **Permission Required**\n\n${errorData.message}\n\nTo create meetings, you need to grant additional Google Calendar permissions.`,
+              needsReauth: true,
+              reauthUrl: errorData.reauthUrl,
+              actionType: 'create_meeting',
+              requiredPermission: errorData.requiredPermission
+            }])
+            return {error: 'insufficient_permissions'}
+          }
+        }
+        throw new Error('meeting_creation_failed')
+      }
+      
+      const j = await res.json()
+      setMessages(m=>[...m,{id:Date.now(), from:'ai', text:'✅ Meeting created successfully! Check your calendar for details.'}])
+      return j
+    } catch(e) {
+      setMessages(m=>[...m,{id:Date.now(), from:'ai', text:`Failed to create meeting: ${e.message || e}`}])
+      throw e
+    }
+  }
+
   function handleKey(e){ if(e.key==='Enter' && !e.shiftKey){ e.preventDefault(); send() }}
 
   return (
@@ -537,7 +917,7 @@ ${summaryData.summary_text || aiResponse}${priorityText}${recommendationsText}${
             messages.map(m=> (
             <div key={m.id} className={`message ${m.from}`} aria-live="polite">
               <div style={{
-                whiteSpace:'pre-wrap',
+                whiteSpace: m.from === 'user' ? 'pre-wrap' : 'normal',
                 background: m.type === 'email_summary' ? 'linear-gradient(135deg, #f8fafc 0%, #f1f5f9 100%)' : 'transparent',
                 padding: m.type === 'email_summary' ? '12px' : '0',
                 borderRadius: m.type === 'email_summary' ? '8px' : '0',
@@ -545,13 +925,59 @@ ${summaryData.summary_text || aiResponse}${priorityText}${recommendationsText}${
                 fontSize: m.typing ? '14px' : '15px',
                 color: m.typing ? '#666' : 'inherit'
               }}>
-                {m.typing ? '💭 Thinking...' : m.text}
+                {m.typing ? '💭 Thinking...' : (
+                  m.from === 'ai' ? 
+                    <ReactMarkdown
+                      components={{
+                        // Custom styling for markdown elements
+                        h1: ({node, ...props}) => <h1 style={{fontSize: '18px', fontWeight: 'bold', margin: '12px 0 8px 0'}} {...props} />,
+                        h2: ({node, ...props}) => <h2 style={{fontSize: '16px', fontWeight: 'bold', margin: '10px 0 6px 0'}} {...props} />,
+                        h3: ({node, ...props}) => <h3 style={{fontSize: '14px', fontWeight: 'bold', margin: '8px 0 4px 0'}} {...props} />,
+                        p: ({node, ...props}) => <p style={{margin: '4px 0', lineHeight: '1.4'}} {...props} />,
+                        ul: ({node, ...props}) => <ul style={{margin: '8px 0', paddingLeft: '16px'}} {...props} />,
+                        ol: ({node, ...props}) => <ol style={{margin: '8px 0', paddingLeft: '16px'}} {...props} />,
+                        li: ({node, ...props}) => <li style={{margin: '2px 0'}} {...props} />,
+                        strong: ({node, ...props}) => <strong style={{fontWeight: '600'}} {...props} />,
+                        em: ({node, ...props}) => <em style={{fontStyle: 'italic'}} {...props} />,
+                        code: ({node, inline, ...props}) => 
+                          inline ? 
+                            <code style={{background: 'rgba(0,0,0,0.08)', padding: '2px 4px', borderRadius: '3px', fontSize: '13px'}} {...props} /> :
+                            <code style={{display: 'block', background: 'rgba(0,0,0,0.05)', padding: '8px', borderRadius: '6px', fontSize: '13px', overflow: 'auto'}} {...props} />,
+                        pre: ({node, ...props}) => <pre style={{background: 'rgba(0,0,0,0.05)', padding: '8px', borderRadius: '6px', fontSize: '13px', overflow: 'auto'}} {...props} />,
+                        blockquote: ({node, ...props}) => <blockquote style={{borderLeft: '3px solid #ddd', marginLeft: '0', paddingLeft: '12px', fontStyle: 'italic', color: '#666'}} {...props} />,
+                        a: ({node, ...props}) => <a style={{color: '#1e40af', textDecoration: 'underline'}} target="_blank" rel="noopener noreferrer" {...props} />,
+                        hr: ({node, ...props}) => <hr style={{border: 'none', borderTop: '1px solid #e5e7eb', margin: '12px 0'}} {...props} />
+                      }}
+                    >
+                      {m.text}
+                    </ReactMarkdown> 
+                    : m.text
+                )}
               </div>
 
               {/* render single suggested action buttons attached to a message */}
               {m.suggestedAction && (
                 <div style={{marginTop:8,display:'flex',gap:8}}>
                   <button onClick={()=>confirmSuggestedAction(m.messageId || m.suggestedAction.messageId, m.suggestedAction)} style={{padding:'6px 8px',borderRadius:8,border:'1px solid rgba(0,0,0,0.06)'}}>Confirm {m.suggestedAction.type}</button>
+                </div>
+              )}
+
+              {/* render chat action buttons (from direct chat meeting creation) */}
+              {m.showChatActionButton && m.chatAction && (
+                <div style={{marginTop:8,display:'flex',gap:8}}>
+                  <button 
+                    onClick={()=>executeChatAction(m.chatAction)} 
+                    style={{
+                      padding:'8px 12px',
+                      borderRadius:8,
+                      border:'1px solid #007bff',
+                      backgroundColor:'#007bff',
+                      color:'white',
+                      cursor:'pointer'
+                    }}
+                  >
+                    📅 Create Meeting
+                  </button>
                 </div>
               )}
 
@@ -567,8 +993,126 @@ ${summaryData.summary_text || aiResponse}${priorityText}${recommendationsText}${
                 </div>
               )}
 
+              {/* Enhanced action buttons for each email */}
+              {m.messageData && m.showActions && (
+                <div style={{
+                  marginTop:12,
+                  padding:'12px',
+                  background:'linear-gradient(135deg, rgba(0,0,0,0.02) 0%, rgba(0,0,0,0.04) 100%)',
+                  borderRadius:12,
+                  border:'1px solid rgba(0,0,0,0.06)'
+                }}>
+                  <div style={{fontSize:'11px',color:'#666',marginBottom:8,fontWeight:'500'}}>
+                    📧 Email Actions
+                  </div>
+                  <div style={{display:'flex',gap:8,flexWrap:'wrap'}}>
+                    <button 
+                      onClick={()=>performAction(m.messageData.id, 'draft_reply')} 
+                      style={{
+                        padding:'8px 12px',
+                        borderRadius:8,
+                        border:'1px solid rgba(59,130,246,0.3)',
+                        background:'rgba(59,130,246,0.1)',
+                        color:'#1e40af',
+                        fontSize:'12px',
+                        fontWeight:'500',
+                        cursor:'pointer',
+                        transition:'all 0.2s ease',
+                        ':hover': {transform:'translateY(-1px)'}
+                      }}
+                      title="Draft AI-powered reply"
+                      onMouseEnter={e => {
+                        e.target.style.transform = 'translateY(-1px)'
+                        e.target.style.boxShadow = '0 4px 8px rgba(59,130,246,0.2)'
+                      }}
+                      onMouseLeave={e => {
+                        e.target.style.transform = 'translateY(0)'
+                        e.target.style.boxShadow = 'none'
+                      }}
+                    >
+                      ✍️ Draft Reply
+                    </button>
+                    <button 
+                      onClick={()=>performAction(m.messageData.id, 'mark_read')} 
+                      style={{
+                        padding:'8px 12px',
+                        borderRadius:8,
+                        border:'1px solid rgba(16,185,129,0.3)',
+                        background:'rgba(16,185,129,0.1)',
+                        color:'#059669',
+                        fontSize:'12px',
+                        fontWeight:'500',
+                        cursor:'pointer',
+                        transition:'all 0.2s ease'
+                      }}
+                      title="Mark as read"
+                      onMouseEnter={e => {
+                        e.target.style.transform = 'translateY(-1px)'
+                        e.target.style.boxShadow = '0 4px 8px rgba(16,185,129,0.2)'
+                      }}
+                      onMouseLeave={e => {
+                        e.target.style.transform = 'translateY(0)'
+                        e.target.style.boxShadow = 'none'
+                      }}
+                    >
+                      ✓ Mark Read
+                    </button>
+                    <button 
+                      onClick={()=>performAction(m.messageData.id, 'delete')} 
+                      style={{
+                        padding:'8px 12px',
+                        borderRadius:8,
+                        border:'1px solid rgba(239,68,68,0.3)',
+                        background:'rgba(239,68,68,0.1)',
+                        color:'#dc2626',
+                        fontSize:'12px',
+                        fontWeight:'500',
+                        cursor:'pointer',
+                        transition:'all 0.2s ease'
+                      }}
+                      title="Delete email"
+                      onMouseEnter={e => {
+                        e.target.style.transform = 'translateY(-1px)'
+                        e.target.style.boxShadow = '0 4px 8px rgba(239,68,68,0.2)'
+                      }}
+                      onMouseLeave={e => {
+                        e.target.style.transform = 'translateY(0)'
+                        e.target.style.boxShadow = 'none'
+                      }}
+                    >
+                      🗑️ Delete
+                    </button>
+                    <button 
+                      onClick={()=>performAction(m.messageData.id, 'create_meeting')} 
+                      style={{
+                        padding:'8px 12px',
+                        borderRadius:8,
+                        border:'1px solid rgba(168,85,247,0.3)',
+                        background:'rgba(168,85,247,0.1)',
+                        color:'#7c3aed',
+                        fontSize:'12px',
+                        fontWeight:'500',
+                        cursor:'pointer',
+                        transition:'all 0.2s ease'
+                      }}
+                      title="Schedule meeting with sender"
+                      onMouseEnter={e => {
+                        e.target.style.transform = 'translateY(-1px)'
+                        e.target.style.boxShadow = '0 4px 8px rgba(168,85,247,0.2)'
+                      }}
+                      onMouseLeave={e => {
+                        e.target.style.transform = 'translateY(0)'
+                        e.target.style.boxShadow = 'none'
+                      }}
+                    >
+                      📅 Schedule Meeting
+                    </button>
+                  </div>
+                </div>
+              )}
+
               {/* legacy support: inline suggested actions stored on messageData (from pending list) */}
-              {m.messageData && m.messageData.suggested && m.messageData.suggested.length>0 && (
+              {m.messageData && m.messageData.suggested && m.messageData.suggested.length>0 && !m.showActions && (
                 <div style={{marginTop:8,display:'flex',gap:8}}>
                   {m.messageData.suggested.map((act,idx)=> (
                     <button key={idx} onClick={()=>{
@@ -580,6 +1124,80 @@ ${summaryData.summary_text || aiResponse}${priorityText}${recommendationsText}${
                       }
                     }} style={{padding:'6px 8px',borderRadius:8,border:'1px solid rgba(0,0,0,0.06)'}}>{act.type}</button>
                   ))}
+                </div>
+              )}
+
+              {/* Re-authorization button for permission errors */}
+              {m.needsReauth && (
+                <div style={{
+                  marginTop:12,
+                  padding:'12px',
+                  background:'linear-gradient(135deg, rgba(239,68,68,0.1) 0%, rgba(239,68,68,0.05) 100%)',
+                  borderRadius:12,
+                  border:'1px solid rgba(239,68,68,0.2)'
+                }}>
+                  <div style={{fontSize:'11px',color:'#dc2626',marginBottom:8,fontWeight:'500'}}>
+                    🔐 Permission Required: {m.requiredPermission}
+                  </div>
+                  <div style={{display:'flex',gap:8,alignItems:'center'}}>
+                    <button 
+                      onClick={() => {
+                        const popup = openOAuthPopup(m.reauthUrl)
+                        monitorOAuthPopup(popup, () => {
+                          console.log('🔐 Permission grant completed')
+                          // Emit event to notify other components
+                          window.dispatchEvent(new CustomEvent('permissionUpdated'))
+                        })
+                      }}
+                      style={{
+                        padding:'8px 16px',
+                        borderRadius:8,
+                        border:'1px solid rgba(239,68,68,0.3)',
+                        background:'rgba(239,68,68,0.1)',
+                        color:'#dc2626',
+                        fontSize:'12px',
+                        fontWeight:'500',
+                        cursor:'pointer',
+                        transition:'all 0.2s ease'
+                      }}
+                      onMouseEnter={e => {
+                        e.target.style.transform = 'translateY(-1px)'
+                        e.target.style.boxShadow = '0 4px 8px rgba(239,68,68,0.2)'
+                      }}
+                      onMouseLeave={e => {
+                        e.target.style.transform = 'translateY(0)'
+                        e.target.style.boxShadow = 'none'
+                      }}
+                    >
+                      {m.actionType === 'complete_setup' || m.actionType === 'retry_setup' ? '🚀 Complete Setup' : '🔓 Grant Permissions'}
+                    </button>
+                    <button 
+                      onClick={async () => {
+                        try {
+                          const base = window.location.hostname === 'localhost' ? 'http://localhost:4000' : ''
+                          const res = await fetch(`${base}/api/auth/permissions`, {credentials:'include'})
+                          if(res.ok) {
+                            const data = await res.json()
+                            const permText = `**Current Permissions:**\n• Gmail Read: ${data.permissions.gmail_read ? '✅' : '❌'}\n• Gmail Send: ${data.permissions.gmail_send ? '✅' : '❌'}\n• Gmail Modify: ${data.permissions.gmail_modify ? '✅' : '❌'}\n• Calendar: ${data.permissions.calendar ? '✅' : '❌'}\n• Tasks: ${data.permissions.tasks ? '✅' : '❌'}\n\n${data.hasAllPermissions ? 'All permissions granted!' : `Missing: ${data.missingPermissions.join(', ')}`}`
+                            setMessages(m=>[...m,{id:Date.now(), from:'ai', text:permText}])
+                          }
+                        } catch(e) {
+                          setMessages(m=>[...m,{id:Date.now(), from:'ai', text:'Failed to check permissions.'}])
+                        }
+                      }}
+                      style={{
+                        padding:'6px 12px',
+                        borderRadius:6,
+                        border:'1px solid rgba(0,0,0,0.1)',
+                        background:'#f9fafb',
+                        color:'#6b7280',
+                        fontSize:'11px',
+                        cursor:'pointer'
+                      }}
+                    >
+                      Check Status
+                    </button>
+                  </div>
                 </div>
               )}
             </div>
@@ -609,15 +1227,15 @@ ${summaryData.summary_text || aiResponse}${priorityText}${recommendationsText}${
         {/* suggestions bar below input */}
         <div style={{padding:'10px',borderTop:'1px solid rgba(0,0,0,0.04)', display:'flex', gap:8, alignItems:'center', justifyContent:'center', flexWrap:'wrap'}} aria-hidden="false">
           <button
-            onClick={loadPendingMessages}
-            onFocus={()=>setFocusedSuggest('recent')}
+            onClick={loadAllUnreadEmails}
+            onFocus={()=>setFocusedSuggest('unread')}
             onBlur={()=>setFocusedSuggest(null)}
-            onKeyDown={(e)=>{ if(e.key==='Enter' || e.key===' ') { e.preventDefault(); loadPendingMessages() } }}
-            aria-label="Recent unread mails (Alt+1)"
+            onKeyDown={(e)=>{ if(e.key==='Enter' || e.key===' ') { e.preventDefault(); loadAllUnreadEmails() } }}
+            aria-label="All unread emails (Alt+1)"
             aria-keyshortcuts="Alt+1"
-            title="Recent unread mails — Alt+1"
-            style={{padding:'8px 12px', borderRadius:20, border:'1px solid rgba(0,0,0,0.06)', background:'#fff', outline: focusedSuggest==='recent' ? '3px solid rgba(21,156,228,0.25)' : 'none', fontSize:'12px'}}
-          >📬 recent mails</button>
+            title="All unread emails with actions — Alt+1"
+            style={{padding:'8px 12px', borderRadius:20, border:'1px solid rgba(59,130,246,0.3)', background:focusedSuggest==='unread'?'rgba(59,130,246,0.1)':'#fff', outline: focusedSuggest==='unread' ? '3px solid rgba(21,156,228,0.25)' : 'none', fontSize:'12px', fontWeight:'500', color:'#1e40af'}}
+          >📬 all unread</button>
 
           <button
             onClick={loadImportantMessages}
@@ -627,7 +1245,7 @@ ${summaryData.summary_text || aiResponse}${priorityText}${recommendationsText}${
             aria-label="Important messages (Alt+2)"
             aria-keyshortcuts="Alt+2"
             title="Important messages — Alt+2"
-            style={{padding:'8px 12px', borderRadius:20, border:'1px solid rgba(0,0,0,0.06)', background:'#fff', outline: focusedSuggest==='important' ? '3px solid rgba(21,156,228,0.25)' : 'none', fontSize:'12px'}}
+            style={{padding:'8px 12px', borderRadius:20, border:'1px solid rgba(245,158,11,0.3)', background:focusedSuggest==='important'?'rgba(245,158,11,0.1)':'#fff', outline: focusedSuggest==='important' ? '3px solid rgba(21,156,228,0.25)' : 'none', fontSize:'12px', fontWeight:'500', color:'#d97706'}}
           >⚡ important</button>
 
           <button
@@ -638,7 +1256,7 @@ ${summaryData.summary_text || aiResponse}${priorityText}${recommendationsText}${
             aria-label="Brief me (Alt+3)"
             aria-keyshortcuts="Alt+3"
             title="Brief me — Alt+3"
-            style={{padding:'8px 12px', borderRadius:20, border:'1px solid rgba(0,0,0,0.06)', background:'#fff', outline: focusedSuggest==='brief' ? '3px solid rgba(21,156,228,0.25)' : 'none', fontSize:'12px'}}
+            style={{padding:'8px 12px', borderRadius:20, border:'1px solid rgba(16,185,129,0.3)', background:focusedSuggest==='brief'?'rgba(16,185,129,0.1)':'#fff', outline: focusedSuggest==='brief' ? '3px solid rgba(21,156,228,0.25)' : 'none', fontSize:'12px', fontWeight:'500', color:'#059669'}}
           >📋 brief me</button>
 
           <button
@@ -658,6 +1276,144 @@ ${summaryData.summary_text || aiResponse}${priorityText}${recommendationsText}${
             style={{padding:'8px 12px', borderRadius:20, border:'1px solid rgba(0,0,0,0.06)', background:'#fff', fontSize:'12px'}}
             title="Get your daily briefing with priorities"
           >🌅 daily briefing</button>
+
+          <button
+            onClick={async () => {
+              try {
+                const base = window.location.hostname === 'localhost' ? 'http://localhost:4000' : ''
+                const debugRes = await fetch(`${base}/api/messages/debug`, {credentials:'include'})
+                
+                if (!debugRes.ok) {
+                  setMessages(m=>[...m,{id:Date.now(), from:'ai', text:'Debug check failed: ' + debugRes.statusText}])
+                  return
+                }
+                
+                const debugJson = await debugRes.json()
+                
+                let sampleText = ''
+                if (debugJson.sample_unread && debugJson.sample_unread.length > 0) {
+                  sampleText += '\n\n**Sample Unread Messages:**\n'
+                  debugJson.sample_unread.forEach((msg, idx) => {
+                    sampleText += `${idx+1}. "${msg.subject}" from ${msg.sender} (${new Date(msg.received_at).toLocaleString()})\n`
+                  })
+                }
+                
+                const debugText = `🔍 **Email Database Debug:**
+• Total messages: ${debugJson.counts.total}
+• Unread messages: ${debugJson.counts.unread}
+• Action required: ${debugJson.counts.action_required}
+• Actioned: ${debugJson.counts.actioned}
+• User ID: ${debugJson.user_id}${sampleText}
+
+If unread count > 0 but you see "No unread messages", the Gmail polling job may need to run.`
+                
+                setMessages(m=>[...m,{id:Date.now(), from:'ai', text:debugText}])
+              } catch(e) {
+                setMessages(m=>[...m,{id:Date.now(), from:'ai', text:'Debug check failed: ' + e.message}])
+              }
+            }}
+            style={{padding:'8px 12px', borderRadius:20, border:'1px solid rgba(156,163,175,0.3)', background:'#f9fafb', fontSize:'11px', color:'#6b7280'}}
+            title="Debug email counts and endpoint status"
+          >🔍 debug</button>
+
+          <button
+            onClick={async () => {
+              try {
+                const base = window.location.hostname === 'localhost' ? 'http://localhost:4000' : ''
+                const res = await fetch(`${base}/api/auth/permissions`, {credentials:'include'})
+                
+                if (!res.ok) {
+                  setMessages(m=>[...m,{id:Date.now(), from:'ai', text:'❌ Failed to check permissions. Please ensure you are logged in.'}])
+                  return
+                }
+                
+                const data = await res.json()
+                
+                const statusIcons = {
+                  gmail_read: data.permissions.gmail_read ? '✅' : '❌',
+                  gmail_send: data.permissions.gmail_send ? '✅' : '❌', 
+                  gmail_modify: data.permissions.gmail_modify ? '✅' : '❌',
+                  calendar: data.permissions.calendar ? '✅' : '❌',
+                  tasks: data.permissions.tasks ? '✅' : '❌'
+                }
+                
+                let permissionText = `🔐 **Google Permissions Status**\n\n`
+                permissionText += `• **Gmail Read:** ${statusIcons.gmail_read} ${data.permissions.gmail_read ? 'Enabled' : 'Missing'}\n`
+                permissionText += `• **Gmail Send:** ${statusIcons.gmail_send} ${data.permissions.gmail_send ? 'Enabled' : 'Missing'}\n`
+                permissionText += `• **Gmail Modify:** ${statusIcons.gmail_modify} ${data.permissions.gmail_modify ? 'Enabled' : 'Missing'}\n`
+                permissionText += `• **Calendar:** ${statusIcons.calendar} ${data.permissions.calendar ? 'Enabled' : 'Missing'}\n`
+                permissionText += `• **Tasks:** ${statusIcons.tasks} ${data.permissions.tasks ? 'Enabled' : 'Missing'}\n\n`
+                
+                if (data.hasAllPermissions) {
+                  permissionText += `✅ **All permissions granted!** You can use all email management features.`
+                } else {
+                  permissionText += `⚠️ **Missing permissions:** ${data.missingPermissions.join(', ')}\n\n`
+                  permissionText += `Some features may not work until you grant additional permissions.`
+                  
+                  setMessages(m=>[...m,{
+                    id:Date.now(), 
+                    from:'ai', 
+                    text:permissionText,
+                    needsReauth: !data.hasAllPermissions,
+                    reauthUrl: data.reauthUrl || '/api/auth/reauth',
+                    actionType: 'check_permissions',
+                    requiredPermission: data.missingPermissions.join(', ')
+                  }])
+                  return
+                }
+                
+                setMessages(m=>[...m,{id:Date.now(), from:'ai', text:permissionText}])
+              } catch(e) {
+                setMessages(m=>[...m,{id:Date.now(), from:'ai', text:'Failed to check permissions: ' + e.message}])
+              }
+            }}
+            style={{padding:'8px 12px', borderRadius:20, border:'1px solid rgba(34,197,94,0.3)', background:'rgba(34,197,94,0.1)', fontSize:'11px', color:'#16a34a'}}
+            title="Check Google API permissions status"
+          >🔐 permissions</button>
+
+          <button
+            onClick={() => {
+              const popup = openOAuthPopup('/api/auth/onboard')
+              monitorOAuthPopup(popup, () => {
+                console.log('🚀 Onboarding completed')
+                // Emit event to notify other components
+                window.dispatchEvent(new CustomEvent('permissionUpdated'))
+              })
+            }}
+            style={{padding:'8px 12px', borderRadius:20, border:'1px solid rgba(99,102,241,0.3)', background:'rgba(99,102,241,0.1)', fontSize:'11px', color:'#4f46e5'}}
+            title="Complete Google permissions setup for new users"
+          >🚀 complete setup</button>
+
+          <button
+            onClick={() => {
+              const markdownTestMessage = `## 📝 Markdown Test
+
+This is a **bold text** and this is *italic text*.
+
+### Features:
+- ✅ **Bold** and *italic* formatting
+- ✅ Lists with proper indentation
+- ✅ \`inline code\` formatting
+- ✅ Links: [One App Club](https://example.com)
+
+#### Code Block Example:
+\`\`\`javascript
+function testMarkdown() {
+  console.log("Markdown is working!");
+}
+\`\`\`
+
+> **Note:** This is a blockquote to test styling.
+
+---
+
+All markdown features are now **fully functional** in AI responses! 🎉`
+
+              setMessages(m=>[...m,{id:Date.now(), from:'ai', text:markdownTestMessage}])
+            }}
+            style={{padding:'8px 12px', borderRadius:20, border:'1px solid rgba(168,85,247,0.3)', background:'rgba(168,85,247,0.1)', fontSize:'11px', color:'#7c3aed'}}
+            title="Test markdown rendering"
+          >📝 test markdown</button>
         </div>
       </div>
     </main>

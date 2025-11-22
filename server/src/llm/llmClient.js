@@ -19,7 +19,8 @@ async function chat(messages = [], opts = {}) {
   const payload = {
     model,
     messages,
-    max_completion_tokens: opts.maxTokens ?? 800,
+    max_tokens: opts.maxTokens ?? 800,
+    temperature: opts.temperature,
     ...opts.extra
   }
 

@@ -11,4 +11,9 @@ async function upsertIntegration(userId, platform, externalAccountId, tokenBlob,
   await db.query(q, [userId, platform, externalAccountId, tokenBlob, JSON.stringify(config||{})])
 }
 
-module.exports = { listIntegrationsForPlatform, upsertIntegration }
+async function getIntegrationByUserAndPlatform(userId, platform){
+  const r = await db.query('SELECT * FROM integrations WHERE user_id=$1 AND platform=$2 AND enabled=true', [userId, platform])
+  return r.rowCount > 0 ? r.rows[0] : null
+}
+
+module.exports = { listIntegrationsForPlatform, upsertIntegration, getIntegrationByUserAndPlatform }

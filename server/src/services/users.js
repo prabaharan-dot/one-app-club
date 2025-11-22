@@ -9,7 +9,10 @@ async function upsertUserByEmail(email, displayName, timezone){
 }
 
 async function getUserById(id){
-  const r = await db.query('SELECT id,email,display_name,timezone,role FROM users WHERE id=$1', [id])
+  const r = await db.query(
+    'SELECT id,email,display_name,timezone,role,location,personal_note FROM users WHERE id=$1', 
+    [id]
+  )
   return r.rows[0]
 }
 
