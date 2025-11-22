@@ -1,5 +1,15 @@
+// Main LLM Processor - Refactored for modularity
 const llm = require('./llmClient')
 const db = require('../db')
+
+// Import modular processors (with new names to avoid conflicts)
+const { LLMProcessor } = require('./processors/coreProcessor')
+const emailProcessors = require('./processors/emailProcessors')
+const meetingProcessors = require('./processors/meetingProcessors')
+const generalProcessors = require('./processors/generalProcessors')
+const contextCollectorModules = require('./processors/contextCollectors')
+const dataHelpers = require('./processors/dataHelpers')
+const { extractJson } = require('./utils/jsonUtils')
 
 /*
  Generic LLM Processor for One App Club
@@ -9,17 +19,18 @@ const db = require('../db')
  - daily_briefing: Complete daily overview
  - meeting_notes: Process meeting transcripts
  - chat_response: General chat interactions
+ - create_meeting: Meeting creation from chat
 */
 
-// Processor registry
+// Processor registry (using original functions for backward compatibility)
 const processors = {
-  'email_actions': processEmailActions,
-  'email_summary': processEmailSummary, 
-  'daily_briefing': processDailyBriefing,
-  'meeting_notes': processMeetingNotes,
-  'chat_response': processChatResponse,
-  'parse_meeting': parseMeetingRequirements,
-  'create_meeting': processChatMeetingCreation
+  'email_actions': processEmailActions,      // Original function defined below
+  'email_summary': processEmailSummary,      // Original function defined below
+  'daily_briefing': processDailyBriefing,    // Original function defined below
+  'meeting_notes': processMeetingNotes,      // Original function defined below  
+  'chat_response': processChatResponse,      // Original function defined below
+  'parse_meeting': parseMeetingRequirements, // Original function defined below
+  'create_meeting': processChatMeetingCreation // Original function defined below
 }
 
 // Context collectors for different processor types
@@ -156,12 +167,25 @@ const contextCollectors = {
 }
 
 // Main processor entry point
+// Main processor instance
+let mainProcessor = null;
+
 async function processLLMRequest(processorType, user, params = {}, opts = {}) {
   try {
-    // If no processor type specified, try to detect from user input
+    // Initialize main processor if not already done
+    if (!mainProcessor) {
+      mainProcessor = new LLMProcessor(llm, db);
+    }
+
+    // If no processor type specified and we have a message, use the new detection system
     if (!processorType && params.message) {
-      processorType = await detectProcessorType(params.message, user)
-      console.log(`Auto-detected processor type: ${processorType}`)
+      const context = { user, ...params };
+      const options = {
+        apiKey: opts.apiKey || process.env.OPENAI_API_KEY,
+        model: opts.model || process.env.OPENAI_MODEL || 'gpt-4o-mini'
+      };
+      
+      return await mainProcessor.processLLMRequest(params.message, context, options);
     }
     
     // Default to chat_response if still no processor type
@@ -918,13 +942,6 @@ function fallbackProcessorDetection(message) {
   return 'chat_response'
 }
 
-function extractJson(text = '') {
-  const first = text.indexOf('{')
-  const last = text.lastIndexOf('}')
-  if (first === -1 || last === -1) throw new Error('No JSON found in LLM response')
-  return text.slice(first, last + 1)
-}
-
 // Followup action processor for prepare requests
 async function followupActionOnEmail(user, email, opts, context = {}) {
   const { selectedAction, calendarBusy } = context
@@ -1339,15 +1356,53 @@ Parse this meeting request and return ONLY JSON: "${meetingText}"`
 }
 
 module.exports = { 
-  processEmail,           // Legacy compatibility
-  processLLMRequest,      // New generic processor
+  // Legacy compatibility
+  processEmail,
+  
+  // Main processor functions
+  processLLMRequest,      // Enhanced generic processor with new modular system
   detectProcessorType,    // Intelligent processor detection
+  
+  // Processor implementations (original functions for backward compatibility)
   processEmailActions,
-  parseMeetingRequirements, // New meeting parser
-  processChatMeetingCreation, // Chat meeting creation
   processEmailSummary,
   processDailyBriefing,
   processMeetingNotes,
   processChatResponse,
-  followupActionOnEmail   // For prepare requests
+  followupActionOnEmail,   // For prepare requests
+  
+  // Meeting/Calendar processors
+  parseMeetingRequirements,
+  processChatMeetingCreation,
+  
+  // Modular processor functions (new exports from modules)
+  processEmailReply: emailProcessors.processEmailReply,
+  extractEmailKeyInfo: emailProcessors.extractEmailKeyInfo,
+  formatMeetingForCalendar: meetingProcessors.formatMeetingForCalendar,
+  validateMeetingData: meetingProcessors.validateMeetingData,
+  processTaskCreation: generalProcessors.processTaskCreation,
+  processQuickAction: generalProcessors.processQuickAction,
+  generateSmartSuggestions: generalProcessors.generateSmartSuggestions,
+  analyzeTextSentiment: generalProcessors.analyzeTextSentiment,
+  
+  // Context collectors
+  getComprehensiveContext: contextCollectorModules.getComprehensiveContext,
+  collectUserContext: contextCollectorModules.collectUserContext,
+  collectMessageContext: contextCollectorModules.collectMessageContext,
+  collectCalendarContext: contextCollectorModules.collectCalendarContext,
+  collectAppContext: contextCollectorModules.collectAppContext,
+  
+  // Data helpers
+  sanitizeInput: dataHelpers.sanitizeInput,
+  normalizeActionData: dataHelpers.normalizeActionData,
+  formatUserContextForPrompt: dataHelpers.formatUserContextForPrompt,
+  validateEmailData: dataHelpers.validateEmailData,
+  formatDateTime: dataHelpers.formatDateTime,
+  extractErrorDetails: dataHelpers.extractErrorDetails,
+  
+  // Utilities
+  extractJson,
+  
+  // New modular processor class
+  LLMProcessor
 }
