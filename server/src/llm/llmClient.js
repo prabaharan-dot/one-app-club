@@ -12,7 +12,7 @@ async function chat(messages = [], opts = {}) {
   const model =  GLOBAL_MODEL
   
   if (!apiKey) throw new Error('Missing OpenAI API key for LLM call')
-  console.log(model)
+  console.log('🤖 LLM call with model:', model)
 
   const client = new OpenAI({ apiKey })
 

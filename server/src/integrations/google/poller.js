@@ -3,12 +3,12 @@ const db = require('../../db')
 const actions = require('./actions')
 const { convert } = require('html-to-text')
 const striptags = require('striptags')
+const integrationUtils = require('../../utils/integrations')
 
 const POLL_INTERVAL = parseInt(process.env.GOOGLE_POLL_INTERVAL || '300000') // 5 minutes
 
 async function getIntegrations(){
-  const res = await db.query("SELECT * FROM integrations WHERE platform='gmail' AND enabled = true")
-  return res.rows
+  return await integrationUtils.listIntegrationsForPlatform('gmail', true)
 }
 
 function oauthClientFromTokens(tokens){

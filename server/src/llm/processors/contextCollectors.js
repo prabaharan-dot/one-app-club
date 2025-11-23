@@ -2,6 +2,8 @@
  * Context collection functions for gathering user data and application state
  */
 
+const integrationUtils = require('../../utils/integrations');
+
 /**
  * Collect user context from database and integrations
  */
@@ -19,11 +21,8 @@ async function collectUserContext(db, userId) {
 
     const user = userRes.rows[0];
 
-    // Get user integrations
-    const integrationsRes = await db.query(
-      'SELECT platform, external_account_id FROM integrations WHERE user_id = $1',
-      [userId]
-    );
+    // Get user integrations using centralized utility
+    const integrations = await integrationUtils.getUserIntegrations(userId, null, true);
 
     // Get pending messages count
     const pendingRes = await db.query(
@@ -53,9 +52,9 @@ async function collectUserContext(db, userId) {
         timezone: user.timezone || 'America/New_York',
         lastGmailPoll: user.last_gmail_poll
       },
-      integrations: integrationsRes.rows.map(row => ({
-        platform: row.platform,
-        accountId: row.external_account_id
+      integrations: integrations.map(integration => ({
+        platform: integration.platform,
+        accountId: integration.external_account_id
       })),
       activity: {
         pendingEmails: parseInt(pendingRes.rows[0].count),

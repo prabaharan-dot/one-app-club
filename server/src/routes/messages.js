@@ -4,6 +4,7 @@ const db = require('../db')
 const {google} = require('googleapis')
 const llmProcessor = require('../llm/processor')
 const integrationsService = require('../services/integrations')
+const integrationUtils = require('../utils/integrations')
 const { createDefaultMeetingTimes, parseUserTimeInput, formatTimeForUser } = require('../utils/timezone')
 
 // Helper function to handle permission errors
@@ -281,10 +282,9 @@ router.post('/:id/prepare', async (req,res)=>{
     let calendarBusy = null
     if(selectedAction && selectedAction.type === 'create_event'){
       try{
-        const ires = await db.query("SELECT * FROM integrations WHERE user_id=$1 AND platform='gmail' AND enabled=true LIMIT 1", [userId])
-        if(ires.rowCount>0){
-          const integration = ires.rows[0]
-          const tokens = JSON.parse(integration.oauth_token_encrypted.toString())
+        const integration = await integrationUtils.getUserIntegration(userId, 'gmail', true)
+        if(integration && integration.tokens){
+          const tokens = integration.tokens
           const o = new google.auth.OAuth2(process.env.GOOGLE_CLIENT_ID, process.env.GOOGLE_CLIENT_SECRET)
           o.setCredentials(tokens)
           const calendar = google.calendar({version:'v3', auth:o})
@@ -339,11 +339,10 @@ router.post('/:id/action', async (req, res) => {
     if(mres.rowCount===0) return res.status(404).json({error:'not_found'})
     const msg = mres.rows[0]
 
-    // fetch gmail integration for user
-    const ires = await db.query("SELECT * FROM integrations WHERE user_id=$1 AND platform='gmail' AND enabled=true LIMIT 1", [userId])
-    if(ires.rowCount===0) return res.status(400).json({error:'no_integration'})
-    const integration = ires.rows[0]
-    const tokens = JSON.parse(integration.oauth_token_encrypted.toString())
+    // fetch gmail integration for user using centralized utility
+    const integration = await integrationUtils.getUserIntegration(userId, 'gmail', true)
+    if(!integration || !integration.tokens) return res.status(400).json({error:'no_integration'})
+    const tokens = integration.tokens
 
     const o = new google.auth.OAuth2(process.env.GOOGLE_CLIENT_ID, process.env.GOOGLE_CLIENT_SECRET)
     o.setCredentials(tokens)

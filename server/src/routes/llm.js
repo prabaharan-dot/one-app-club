@@ -2,6 +2,7 @@ const express = require('express')
 const router = express.Router()
 const db = require('../db')
 const llmProcessor = require('../llm/processor')
+const integrationUtils = require('../utils/integrations')
 
 // POST /api/llm/process
 // Generic LLM processing endpoint
@@ -409,21 +410,18 @@ router.post('/execute-action', async (req, res) => {
       const meetingData = action.payload
       
       try {
-        // Get user's Google OAuth tokens (use 'gmail' platform like other routes)
-        const integrationRes = await db.query(
-          'SELECT oauth_token_encrypted FROM integrations WHERE user_id = $1 AND platform = $2 AND enabled = true',
-          [userId, 'gmail']
-        )
+        // Validate Google integration using centralized utility
+        const validation = await integrationUtils.validateUserIntegration(userId, 'gmail', true)
 
-        if (integrationRes.rowCount === 0) {
-          console.error(`❌ No Google integration found for user ${userId}`)
+        if (!validation.hasIntegration || !validation.hasValidTokens) {
+          console.error(`❌ Google integration validation failed for user ${userId}:`, validation.errorCode)
           return res.status(400).json({ 
             error: 'google_not_connected',
-            message: 'Please connect your Google Calendar first. Go to Settings → Integrations to connect your Google account.'
+            message: validation.errorMessage || 'Please connect your Google Calendar first. Go to Settings → Integrations to connect your Google account.'
           })
         }
 
-        const tokens = JSON.parse(integrationRes.rows[0].oauth_token_encrypted.toString())
+        const tokens = validation.integration.tokens
         
         // Create OAuth2 client and calendar service (same as messages route)
         const oauth2Client = new google.auth.OAuth2(
@@ -532,21 +530,18 @@ router.post('/execute-action', async (req, res) => {
       const taskData = action.data
       
       try {
-        // Get user's Google OAuth tokens (same pattern as calendar)
-        const integrationRes = await db.query(
-          'SELECT oauth_token_encrypted FROM integrations WHERE user_id = $1 AND platform = $2 AND enabled = true',
-          [userId, 'gmail']
-        )
+        // Validate Google integration using centralized utility
+        const validation = await integrationUtils.validateUserIntegration(userId, 'gmail', true)
 
-        if (integrationRes.rowCount === 0) {
-          console.error(`❌ No Google integration found for user ${userId}`)
+        if (!validation.hasIntegration || !validation.hasValidTokens) {
+          console.error(`❌ Google integration validation failed for user ${userId}:`, validation.errorCode)
           return res.status(400).json({ 
             error: 'google_not_connected',
-            message: 'Please connect your Google account first. Go to Settings → Integrations to connect your Google account.'
+            message: validation.errorMessage || 'Please connect your Google account first. Go to Settings → Integrations to connect your Google account.'
           })
         }
 
-        const tokens = JSON.parse(integrationRes.rows[0].oauth_token_encrypted.toString())
+        const tokens = validation.integration.tokens
         
         // Create OAuth2 client and Tasks service
         const oauth2Client = new google.auth.OAuth2(

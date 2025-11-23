@@ -179,13 +179,17 @@ async function processLLMRequest(processorType, user, params = {}, opts = {}) {
 
     // If no processor type specified and we have a message, use the new detection system
     if (!processorType && params.message) {
+      console.log('🔄 Using new LLMProcessor for intelligent processing:', params.message.substring(0, 50) + '...');
+      
       const context = { user, ...params };
       const options = {
         apiKey: opts.apiKey || process.env.OPENAI_API_KEY,
         model: opts.model || process.env.OPENAI_MODEL || 'gpt-4o-mini'
       };
       
-      return await mainProcessor.processLLMRequest(params.message, context, options);
+      const result = await mainProcessor.processLLMRequest(params.message, context, options);
+      console.log('✅ New processor result type:', result.type);
+      return result;
     }
     
     // Default to chat_response if still no processor type

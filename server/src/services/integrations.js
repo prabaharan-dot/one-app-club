@@ -1,19 +1,50 @@
-const db = require('../db')
+/**
+ * Legacy integrations service
+ * @deprecated Use utils/integrations.js for new code
+ * This file maintains backward compatibility for existing code
+ */
 
-async function listIntegrationsForPlatform(platform){
-  const r = await db.query('SELECT * FROM integrations WHERE platform=$1 AND enabled=true', [platform])
-  return r.rows
+const integrationUtils = require('../utils/integrations')
+
+// Legacy function - use integrationUtils.listIntegrationsForPlatform instead
+async function listIntegrationsForPlatform(platform) {
+  return await integrationUtils.listIntegrationsForPlatform(platform, true)
 }
 
-async function upsertIntegration(userId, platform, externalAccountId, tokenBlob, config){
-  const q = `INSERT INTO integrations (user_id, platform, external_account_id, oauth_token_encrypted, config, enabled, created_at, updated_at)
-  VALUES ($1,$2,$3,$4,$5,true,now(),now()) ON CONFLICT (user_id, external_account_id, platform) DO UPDATE SET oauth_token_encrypted=EXCLUDED.oauth_token_encrypted, config=EXCLUDED.config, updated_at=now()`
-  await db.query(q, [userId, platform, externalAccountId, tokenBlob, JSON.stringify(config||{})])
+// Legacy function - use integrationUtils.upsertIntegration instead  
+async function upsertIntegration(userId, platform, externalAccountId, tokenBlob, config) {
+  // Convert tokenBlob to tokens object if needed
+  const tokens = tokenBlob instanceof Buffer 
+    ? JSON.parse(tokenBlob.toString())
+    : (typeof tokenBlob === 'string' ? JSON.parse(tokenBlob) : tokenBlob)
+  
+  return await integrationUtils.upsertIntegration(userId, platform, externalAccountId, tokens, config || {})
 }
 
-async function getIntegrationByUserAndPlatform(userId, platform){
-  const r = await db.query('SELECT * FROM integrations WHERE user_id=$1 AND platform=$2 AND enabled=true', [userId, platform])
-  return r.rowCount > 0 ? r.rows[0] : null
+// Legacy function - use integrationUtils.getUserIntegration instead
+async function getIntegrationByUserAndPlatform(userId, platform) {
+  const integration = await integrationUtils.getUserIntegration(userId, platform, true)
+  
+  // Return in legacy format (without parsed tokens/config for backward compatibility)
+  if (integration) {
+    return {
+      id: integration.id,
+      user_id: integration.user_id,
+      platform: integration.platform,
+      external_account_id: integration.external_account_id,
+      oauth_token_encrypted: integration.oauth_token_encrypted,
+      config: integration.config,
+      enabled: integration.enabled,
+      created_at: integration.created_at,
+      updated_at: integration.updated_at
+    }
+  }
+  
+  return null
 }
 
-module.exports = { listIntegrationsForPlatform, upsertIntegration, getIntegrationByUserAndPlatform }
+module.exports = { 
+  listIntegrationsForPlatform, 
+  upsertIntegration, 
+  getIntegrationByUserAndPlatform 
+}

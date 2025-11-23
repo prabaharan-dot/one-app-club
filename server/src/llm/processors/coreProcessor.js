@@ -10,7 +10,8 @@ const {
 } = require('./emailProcessors');
 const { 
   processChatMeetingCreation, 
-  parseMeetingRequirements 
+  parseMeetingRequirements,
+  formatMeetingForCalendar 
 } = require('./meetingProcessors');
 const { 
   processGeneralChat, 
@@ -27,6 +28,8 @@ const {
   formatUserContextForPrompt,
   extractErrorDetails
 } = require('./dataHelpers');
+const { createCalendarEvent } = require('../../integrations/google/actions');
+const integrationUtils = require('../../utils/integrations');
 
 /**
  * Main LLM processor orchestrator
@@ -220,6 +223,93 @@ What processor type should handle this request?`;
   /**
    * Process meeting creation requests
    */
+  async createMeetingAutomatically(meetingData, context, options) {
+    try {
+      console.log('🔍 Checking user authentication and Google integration...');
+      
+      // Get user ID from context
+      const userId = context.user?.id;
+      if (!userId) {
+        throw new Error('User not authenticated');
+      }
+
+      // Validate Google integration using centralized utility
+      console.log('� Validating Gmail integration for user:', userId);
+      const validation = await integrationUtils.validateUserIntegration(userId, 'gmail', true);
+
+      if (!validation.hasIntegration) {
+        console.warn('❌ No Gmail integration found for user:', userId);
+        throw new Error('Google integration not found');
+      }
+
+      if (!validation.hasValidTokens) {
+        console.warn('🔐 Invalid Gmail tokens for user:', userId);
+        throw new Error(validation.errorCode === 'INVALID_TOKENS' ? 'Google authentication expired' : 'OAuth tokens not available');
+      }
+
+      const tokens = validation.integration.tokens;
+
+      console.log('🗓️ Creating calendar event via Google Calendar API...');
+      
+      // Format meeting data for Google Calendar
+      const calendarEvent = formatMeetingForCalendar(meetingData);
+      console.log('📋 Formatted calendar event:', {
+        summary: calendarEvent.summary,
+        start: calendarEvent.start,
+        end: calendarEvent.end
+      });
+
+      // Create the calendar event
+      const createdEvent = await createCalendarEvent(tokens, calendarEvent);
+      
+      console.log('✅ Calendar event created successfully:', {
+        eventId: createdEvent.id,
+        htmlLink: createdEvent.htmlLink,
+        title: createdEvent.summary
+      });
+
+      return {
+        success: true,
+        eventId: createdEvent.id,
+        link: createdEvent.htmlLink,
+        calendarEvent: createdEvent
+      };
+
+    } catch (error) {
+      console.error('🚨 createMeetingAutomatically error:', {
+        message: error.message,
+        userId: context.user?.id,
+        platform: 'gmail'
+      });
+      throw error;
+    }
+  }
+
+  formatDateTimeForUser(datetime, timezone = 'UTC') {
+    try {
+      const date = new Date(datetime);
+      if (isNaN(date.getTime())) {
+        return datetime; // Return original if invalid
+      }
+
+      const options = {
+        weekday: 'long',
+        year: 'numeric',
+        month: 'long',
+        day: 'numeric',
+        hour: 'numeric',
+        minute: '2-digit',
+        timeZoneName: 'short',
+        timeZone: timezone
+      };
+
+      return date.toLocaleString('en-US', options);
+    } catch (error) {
+      console.warn('formatDateTimeForUser error:', error);
+      return datetime; // Fallback to original value
+    }
+  }
+
   async processMeetingRequest(input, context, options) {
     try {
       const meetingData = await processChatMeetingCreation(input, context, {
@@ -227,16 +317,74 @@ What processor type should handle this request?`;
         ...options
       });
 
-      return {
-        type: 'create_meeting',
-        content: `I can help you create a meeting: "${meetingData.title}"`,
-        data: meetingData,
-        actions: [{
+      // Automatically create the meeting if we have sufficient details
+      console.log('📅 Meeting data ready, attempting to create automatically...');
+      
+      try {
+        const createdMeeting = await this.createMeetingAutomatically(meetingData, context, options);
+        
+        if (createdMeeting.success) {
+          const formattedDateTime = this.formatDateTimeForUser(meetingData.start_datetime, context.user?.timezone);
+          
+          console.log('✅ Meeting created automatically:', {
+            title: meetingData.title,
+            eventId: createdMeeting.eventId,
+            user: context.user?.email
+          });
+          
+          return {
+            type: 'meeting_created',
+            content: `✅ **Meeting Created Successfully!**
+
+📅 **${meetingData.title}**
+🕐 ${formattedDateTime}
+${meetingData.location ? `📍 ${meetingData.location}` : ''}
+
+🎉 **Added to your Google Calendar!** ${createdMeeting.link ? `[View Meeting](${createdMeeting.link})` : ''}`,
+            data: {
+              ...meetingData,
+              calendarEventId: createdMeeting.eventId,
+              calendarLink: createdMeeting.link,
+              created: true,
+              autoCreated: true
+            }
+          };
+        }
+      } catch (autoCreateError) {
+        console.warn('⚠️ Auto-creation failed, falling back to manual confirmation:', autoCreateError.message);
+        
+        // Provide helpful error message based on the error type
+        let errorMessage = '⚠️ I couldn\'t create it automatically, so please confirm to add it to your Google Calendar.';
+        
+        if (autoCreateError.message.includes('integration not found')) {
+          errorMessage = '🔗 **Connect Google Account**: Go to Settings → Integrations → Connect Google Account to enable automatic meeting creation.';
+        } else if (autoCreateError.message.includes('authentication expired')) {
+          errorMessage = '🔄 **Reconnect Required**: Your Google account connection expired. Please reconnect in Settings → Integrations.';
+        } else if (autoCreateError.message.includes('not authenticated')) {
+          errorMessage = '🔐 **Login Required**: Please log in to create meetings automatically.';
+        } else if (autoCreateError.message.includes('quota') || autoCreateError.message.includes('rate limit')) {
+          errorMessage = '⏱️ **Temporarily Unavailable**: Google Calendar API is busy. Please try again in a moment.';
+        }
+        
+        // If auto-creation fails, fall back to requiring user confirmation
+        return {
           type: 'create_meeting',
-          label: 'Create Meeting',
-          data: meetingData
-        }]
-      };
+          content: `I can help you create a meeting: "${meetingData.title}"
+
+**Meeting Details:**
+📅 **${meetingData.title}**
+🕐 ${this.formatDateTimeForUser(meetingData.start_datetime, context.user?.timezone)}
+📍 ${meetingData.location || 'No location specified'}
+
+${errorMessage}`,
+          data: meetingData,
+          actions: [{
+            type: 'create_meeting',
+            label: 'Create Meeting',
+            data: meetingData
+          }]
+        };
+      }
     } catch (error) {
       console.error('processMeetingRequest error:', error);
       return {

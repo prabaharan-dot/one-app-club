@@ -10,31 +10,47 @@ const { extractJson } = require('../utils/jsonUtils');
 async function processChatMeetingCreation(input, context, options = {}) {
   const { llmClient } = options;
 
-  const systemPrompt = `You are a calendar assistant. Parse meeting requests from natural language.
+  const systemPrompt = `You are a calendar assistant. Parse meeting requests from natural language and return ONLY valid JSON.
 
-Extract meeting details and return ONLY valid JSON:
+Current date/time: ${new Date().toISOString()}
+
+IMPORTANT: Only generate a meeting if the request contains SPECIFIC date and time information. If date/time is missing or vague, return: {"error": "missing_datetime"}
+
+Required JSON format when date/time is present:
 {
   "title": "meeting title",
-  "description": "meeting description", 
+  "description": "optional description", 
   "start_datetime": "ISO string (YYYY-MM-DDTHH:mm:ss)",
   "end_datetime": "ISO string (YYYY-MM-DDTHH:mm:ss)",
-  "location": "location if mentioned",
-  "recurrence": {
-    "frequency": "daily|weekly|monthly|yearly",
-    "interval": 1,
-    "until": "ISO date string (YYYY-MM-DD)",
-    "count": 10
-  }
+  "location": "optional location"
 }
 
+Examples:
+Input: "schedule a meeting tomorrow at 2pm"
+Output: {"title":"Meeting","start_datetime":"2025-11-24T14:00:00","end_datetime":"2025-11-24T14:30:00"}
+
+Input: "create a meeting tomorrow 9am"
+Output: {"title":"Meeting","start_datetime":"2025-11-24T09:00:00","end_datetime":"2025-11-24T09:30:00"}
+
+Input: "book team standup friday 9am"
+Output: {"title":"Team standup","start_datetime":"2025-11-29T09:00:00","end_datetime":"2025-11-29T09:30:00"}
+
+Input: "schedule a meeting" (no time specified)
+Output: {"error": "missing_datetime"}
+
+Input: "let's meet sometime" (vague time)
+Output: {"error": "missing_datetime"}
+
 Rules:
-- Use current year if not specified
-- Default duration: 30 minutes
-- For recurring: include recurrence object
-- For one-time: omit recurrence
-- Always use 24-hour format
-- Location is optional
-- Use conversation history to gather complete meeting details`;
+- ONLY create meeting JSON if specific date AND time are provided
+- Accept various time formats: "9am", "9:00am", "09:00", "9 am"
+- Accept date keywords: "tomorrow", "today", day names (monday, friday, etc.)
+- Tomorrow = ${new Date(Date.now() + 24*60*60*1000).toISOString().split('T')[0]}
+- Use current year ${new Date().getFullYear()} for dates
+- Default duration: 30 minutes if not specified
+- Convert to ISO string format (YYYY-MM-DDTHH:mm:ss)
+- Return error JSON if date/time missing or vague
+- Return ONLY the JSON object, no other text`;
 
   try {
     // Build messages array with conversation history for better context
@@ -49,20 +65,206 @@ Rules:
     // Add current user input
     messages.push({ role: 'user', content: input });
     
+    console.log('📅 Meeting creation - sending to LLM:', { 
+      input, 
+      historyCount: context?.conversationHistory?.length || 0,
+      currentDate: new Date().toISOString(),
+      tomorrowDate: new Date(Date.now() + 24*60*60*1000).toISOString().split('T')[0]
+    });
+    
     const response = await llmClient.chat(messages, {
       apiKey: options.apiKey,
       model: options.model
     });
 
+    console.log('📅 Meeting creation - LLM response:', response);
+    console.log('📅 Meeting creation - LLM response type:', typeof response);
+
     const result = extractJson(response);
-    if (!result || !result.title) {
-      throw new Error('Invalid meeting data extracted');
+    console.log('📅 Meeting creation - extracted JSON:', result);
+
+    if (!result) {
+      console.error('❌ No JSON extracted from LLM response');
+      throw new Error('Could not extract meeting data from response');
     }
 
+    // Check if LLM returned an error (missing datetime)
+    if (result.error === 'missing_datetime') {
+      console.log('⚠️ LLM detected missing date/time information');
+      throw new Error('MISSING_DATETIME');
+    }
+
+    // Check if we have the minimum requirements (date/time)
+    const hasDateTime = result.start_datetime && result.end_datetime;
+    
+    if (!hasDateTime) {
+      console.log('⚠️ Missing date/time information in result, asking for clarification');
+      throw new Error('MISSING_DATETIME');
+    }
+
+    // Handle title - try to infer from context or previous conversation
+    if (!result.title) {
+      console.log('⚠️ Missing meeting title, attempting to infer from context');
+      result.title = inferMeetingTitle(input, context);
+    }
+
+    // Additional validation and fixing of datetime if needed
+    if (result.start_datetime && result.end_datetime) {
+      const startDate = new Date(result.start_datetime);
+      const endDate = new Date(result.end_datetime);
+      
+      // Check if dates are valid
+      if (isNaN(startDate.getTime()) || isNaN(endDate.getTime())) {
+        console.error('❌ Invalid date formats detected, attempting to fix...');
+        // Try to parse the input manually as fallback
+        const manualParse = parseManualDateTime(input);
+        if (manualParse.success) {
+          result.start_datetime = manualParse.start_datetime;
+          result.end_datetime = manualParse.end_datetime;
+          console.log('✅ Fixed datetime using manual parsing:', { start: result.start_datetime, end: result.end_datetime });
+        } else {
+          throw new Error('VALIDATION_ERROR: Invalid datetime format');
+        }
+      }
+    }
+
+    // Validate the extracted meeting data
+    const validation = validateMeetingData(result);
+    if (!validation.valid) {
+      console.error('❌ Invalid meeting data:', validation.errors);
+      throw new Error(`VALIDATION_ERROR: ${validation.errors.join(', ')}`);
+    }
+
+    console.log('✅ Meeting creation successful:', { title: result.title, start: result.start_datetime, end: result.end_datetime });
     return result;
   } catch (error) {
     console.error('processChatMeetingCreation error:', error);
-    throw new Error('Could not parse meeting request');
+    console.error('Error details:', { input, context: !!context, options: !!options });
+    
+    // Handle specific error types for better user experience
+    if (error.message === 'MISSING_DATETIME') {
+      throw new Error('MISSING_DATETIME');
+    }
+    
+    if (error.message.startsWith('VALIDATION_ERROR')) {
+      throw new Error(error.message);
+    }
+    
+    throw new Error(`Could not parse meeting request: ${error.message}`);
+  }
+}
+
+/**
+ * Infer meeting title from input and conversation context
+ */
+function inferMeetingTitle(input, context) {
+  // First, try to extract a title from the input itself
+  let title = input
+    .replace(/^(schedule|create|book|set up|plan)\s+(a\s+)?(meeting|call|appointment|session)/i, '')
+    .replace(/\b(for|about|with|on)\s+/gi, '')
+    .replace(/\b(tomorrow|today|monday|tuesday|wednesday|thursday|friday|saturday|sunday|next\s+week)\b/gi, '')
+    .replace(/\b\d{1,2}(:\d{2})?\s?(am|pm)\b/gi, '')
+    .replace(/\bat\s+/gi, '')
+    .trim();
+
+  // If we got something meaningful from the input, use it
+  if (title.length > 3 && !title.match(/^(meeting|call|appointment)$/i)) {
+    return title.charAt(0).toUpperCase() + title.slice(1);
+  }
+
+  // Try to infer from conversation history
+  if (context?.conversationHistory && context.conversationHistory.length > 0) {
+    const recentMessages = context.conversationHistory.slice(-5);
+    
+    // Look for meeting-related topics in recent conversation
+    for (const msg of recentMessages.reverse()) {
+      if (msg.role === 'user' && msg.content) {
+        const content = msg.content.toLowerCase();
+        
+        // Look for project names, team names, or topics
+        const projectMatches = content.match(/\b(project|team|review|standup|sync|discussion|planning)\s+(\w+)/i);
+        if (projectMatches) {
+          return `${projectMatches[1]} ${projectMatches[2]}`.replace(/^\w/, c => c.toUpperCase());
+        }
+        
+        // Look for "about" or "for" topics
+        const topicMatch = content.match(/\b(?:about|for|regarding|discuss)\s+([^.,!?]+)/i);
+        if (topicMatch) {
+          const topic = topicMatch[1].trim().substring(0, 50);
+          if (topic.length > 3) {
+            return topic.charAt(0).toUpperCase() + topic.slice(1);
+          }
+        }
+      }
+    }
+  }
+
+  // Default title for ad-hoc requests
+  return 'Meeting';
+}
+
+/**
+ * Manual datetime parsing as fallback when LLM fails
+ */
+function parseManualDateTime(input) {
+  try {
+    const lowerInput = input.toLowerCase();
+    
+    // Extract time
+    const timeMatch = lowerInput.match(/\b(\d{1,2})(?::(\d{2}))?\s*(am|pm)?\b/);
+    if (!timeMatch) {
+      return { success: false };
+    }
+    
+    let hours = parseInt(timeMatch[1]);
+    const minutes = parseInt(timeMatch[2] || '0');
+    const ampm = timeMatch[3];
+    
+    // Convert to 24-hour format
+    if (ampm === 'pm' && hours !== 12) {
+      hours += 12;
+    } else if (ampm === 'am' && hours === 12) {
+      hours = 0;
+    }
+    
+    // Extract date
+    let targetDate = new Date();
+    
+    if (lowerInput.includes('tomorrow')) {
+      targetDate.setDate(targetDate.getDate() + 1);
+    } else if (lowerInput.includes('today')) {
+      // Keep current date
+    } else {
+      // Check for day names
+      const dayNames = ['sunday', 'monday', 'tuesday', 'wednesday', 'thursday', 'friday', 'saturday'];
+      for (let i = 0; i < dayNames.length; i++) {
+        if (lowerInput.includes(dayNames[i])) {
+          const today = targetDate.getDay();
+          const targetDay = i;
+          let daysToAdd = targetDay - today;
+          if (daysToAdd <= 0) daysToAdd += 7; // Next week
+          targetDate.setDate(targetDate.getDate() + daysToAdd);
+          break;
+        }
+      }
+    }
+    
+    // Set the time
+    targetDate.setHours(hours, minutes, 0, 0);
+    
+    // Create end time (30 minutes later)
+    const endDate = new Date(targetDate);
+    endDate.setMinutes(endDate.getMinutes() + 30);
+    
+    return {
+      success: true,
+      start_datetime: targetDate.toISOString().slice(0, 19), // Remove Z
+      end_datetime: endDate.toISOString().slice(0, 19)       // Remove Z
+    };
+    
+  } catch (error) {
+    console.error('Manual datetime parsing failed:', error);
+    return { success: false };
   }
 }
 
@@ -210,5 +412,7 @@ module.exports = {
   processChatMeetingCreation,
   parseMeetingRequirements,
   formatMeetingForCalendar,
-  validateMeetingData
+  validateMeetingData,
+  inferMeetingTitle,
+  parseManualDateTime
 };

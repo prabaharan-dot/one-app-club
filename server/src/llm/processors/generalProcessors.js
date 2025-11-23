@@ -1,4 +1,5 @@
 const { extractJson } = require('../utils/jsonUtils');
+const integrationUtils = require('../../utils/integrations');
 
 /**
  * General-purpose processor functions for various chat and text processing tasks
@@ -150,15 +151,12 @@ Rules:
     // If user and db are provided, try to create the task in Google Tasks
     if (user && db) {
       try {
-        // Get user's Google integration (use same pattern as calendar integration)
-        const integrationRes = await db.query(
-          'SELECT oauth_token_encrypted FROM integrations WHERE user_id = $1 AND platform = $2 AND enabled = true',
-          [user.id, 'gmail']
-        );
+        // Validate Google integration using centralized utility
+        const validation = await integrationUtils.validateUserIntegration(user.id, 'gmail', true);
 
-        if (integrationRes.rows.length > 0) {
-          // Parse the stored OAuth tokens
-          const tokens = JSON.parse(integrationRes.rows[0].oauth_token_encrypted.toString());
+        if (validation.hasIntegration && validation.hasValidTokens) {
+          // Get the parsed OAuth tokens
+          const tokens = validation.integration.tokens;
           
           // Create Google Auth with proper client credentials (same as calendar code)
           const { google } = require('googleapis');
