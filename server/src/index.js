@@ -35,6 +35,8 @@ app.use('/api/settings', settingsRoutes)
 app.use('/api/messages', require('./routes/messages'))
 app.use('/api/llm', require('./routes/llm'))
 app.use('/api/chat', require('./routes/chat'))
+app.use('/api/phase1', require('./routes/phase1')) // Phase 1 features
+app.use('/api/phase2', require('./routes/phase2')) // Phase 2 features
 
 async function start(){
   try{

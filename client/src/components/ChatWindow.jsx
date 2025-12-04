@@ -2,6 +2,12 @@ import React, { useState, useRef, useEffect } from 'react'
 import ReactMarkdown from 'react-markdown'
 import { useNavigate } from 'react-router-dom'
 import { monitorOAuthPopup, openOAuthPopup } from '../utils/oauth'
+import EmailTemplateModal from './EmailTemplateModal'
+import SnoozeModal from './SnoozeModal'
+import EnhancedSearchBar from './EnhancedSearchBar'
+import EmailSchedulingModal from './EmailSchedulingModal'
+import SmartNotificationPanel from './SmartNotificationPanel'
+import EmailAnalyticsDashboard from './EmailAnalyticsDashboard'
 
 export default function ChatWindow(){
   const [messages, setMessages] = useState([])
@@ -9,6 +15,20 @@ export default function ChatWindow(){
   const [focusedSuggest, setFocusedSuggest] = useState(null) // 'unread' | 'important' | 'brief' | null
   const [currentSessionId, setCurrentSessionId] = useState(null)
   const [sessionLoading, setSessionLoading] = useState(true)
+  
+  // Phase 1 feature states
+  const [showTemplateModal, setShowTemplateModal] = useState(false)
+  const [showSnoozeModal, setShowSnoozeModal] = useState(false)
+  const [selectedMessageForAction, setSelectedMessageForAction] = useState(null)
+  const [showSearchBar, setShowSearchBar] = useState(false)
+  const [searchResults, setSearchResults] = useState([])
+  
+  // Phase 2 feature states
+  const [showSchedulingModal, setShowSchedulingModal] = useState(false)
+  const [showNotificationPanel, setShowNotificationPanel] = useState(false)
+  const [showAnalyticsDashboard, setShowAnalyticsDashboard] = useState(false)
+  const [notificationCount, setNotificationCount] = useState(0)
+  
   const bodyRef = useRef()
   const navigate = useNavigate()
 
@@ -1181,6 +1201,167 @@ ${summaryData.summary_text || aiResponse}${priorityText}${recommendationsText}${
                     >
                       📅 Schedule Meeting
                     </button>
+                    {/* Phase 1 Feature Buttons */}
+                    <button 
+                      onClick={() => {
+                        setSelectedMessageForAction(m.messageData)
+                        setShowTemplateModal(true)
+                      }}
+                      style={{
+                        padding:'8px 12px',
+                        borderRadius:8,
+                        border:'1px solid rgba(245,158,11,0.3)',
+                        background:'rgba(245,158,11,0.1)',
+                        color:'#d97706',
+                        fontSize:'12px',
+                        fontWeight:'500',
+                        cursor:'pointer',
+                        transition:'all 0.2s ease'
+                      }}
+                      title="Use email template"
+                      onMouseEnter={e => {
+                        e.target.style.transform = 'translateY(-1px)'
+                        e.target.style.boxShadow = '0 4px 8px rgba(245,158,11,0.2)'
+                      }}
+                      onMouseLeave={e => {
+                        e.target.style.transform = 'translateY(0)'
+                        e.target.style.boxShadow = 'none'
+                      }}
+                    >
+                      📝 Template
+                    </button>
+                    <button 
+                      onClick={() => {
+                        setSelectedMessageForAction(m.messageData)
+                        setShowSnoozeModal(true)
+                      }}
+                      style={{
+                        padding:'8px 12px',
+                        borderRadius:8,
+                        border:'1px solid rgba(99,102,241,0.3)',
+                        background:'rgba(99,102,241,0.1)',
+                        color:'#4338ca',
+                        fontSize:'12px',
+                        fontWeight:'500',
+                        cursor:'pointer',
+                        transition:'all 0.2s ease'
+                      }}
+                      title="Snooze email"
+                      onMouseEnter={e => {
+                        e.target.style.transform = 'translateY(-1px)'
+                        e.target.style.boxShadow = '0 4px 8px rgba(99,102,241,0.2)'
+                      }}
+                      onMouseLeave={e => {
+                        e.target.style.transform = 'translateY(0)'
+                        e.target.style.boxShadow = 'none'
+                      }}
+                    >
+                      ⏰ Snooze
+                    </button>
+                    <button 
+                      onClick={() => setShowSearchBar(true)}
+                      style={{
+                        padding:'8px 12px',
+                        borderRadius:8,
+                        border:'1px solid rgba(139,92,246,0.3)',
+                        background:'rgba(139,92,246,0.1)',
+                        color:'#7c2d12',
+                        fontSize:'12px',
+                        fontWeight:'500',
+                        cursor:'pointer',
+                        transition:'all 0.2s ease'
+                      }}
+                      title="Enhanced search"
+                      onMouseEnter={e => {
+                        e.target.style.transform = 'translateY(-1px)'
+                        e.target.style.boxShadow = '0 4px 8px rgba(139,92,246,0.2)'
+                      }}
+                      onMouseLeave={e => {
+                        e.target.style.transform = 'translateY(0)'
+                        e.target.style.boxShadow = 'none'
+                      }}
+                    >
+                      🔍 Search
+                    </button>
+                    {/* Phase 2 Feature Buttons */}
+                    <button 
+                      onClick={() => {
+                        setSelectedMessageForAction(m.messageData)
+                        setShowSchedulingModal(true)
+                      }}
+                      style={{
+                        padding:'8px 12px',
+                        borderRadius:8,
+                        border:'1px solid rgba(16,185,129,0.3)',
+                        background:'rgba(16,185,129,0.1)',
+                        color:'#059669',
+                        fontSize:'12px',
+                        fontWeight:'500',
+                        cursor:'pointer',
+                        transition:'all 0.2s ease'
+                      }}
+                      title="Schedule email for optimal timing"
+                      onMouseEnter={e => {
+                        e.target.style.transform = 'translateY(-1px)'
+                        e.target.style.boxShadow = '0 4px 8px rgba(16,185,129,0.2)'
+                      }}
+                      onMouseLeave={e => {
+                        e.target.style.transform = 'translateY(0)'
+                        e.target.style.boxShadow = 'none'
+                      }}
+                    >
+                      📅 Schedule
+                    </button>
+                    <button 
+                      onClick={() => setShowNotificationPanel(true)}
+                      style={{
+                        padding:'8px 12px',
+                        borderRadius:8,
+                        border:'1px solid rgba(239,68,68,0.3)',
+                        background:'rgba(239,68,68,0.1)',
+                        color:'#dc2626',
+                        fontSize:'12px',
+                        fontWeight:'500',
+                        cursor:'pointer',
+                        transition:'all 0.2s ease'
+                      }}
+                      title="Smart notifications and alerts"
+                      onMouseEnter={e => {
+                        e.target.style.transform = 'translateY(-1px)'
+                        e.target.style.boxShadow = '0 4px 8px rgba(239,68,68,0.2)'
+                      }}
+                      onMouseLeave={e => {
+                        e.target.style.transform = 'translateY(0)'
+                        e.target.style.boxShadow = 'none'
+                      }}
+                    >
+                      🔔 Alerts {notificationCount > 0 && <span className="notification-badge">{notificationCount}</span>}
+                    </button>
+                    <button 
+                      onClick={() => setShowAnalyticsDashboard(true)}
+                      style={{
+                        padding:'8px 12px',
+                        borderRadius:8,
+                        border:'1px solid rgba(147,51,234,0.3)',
+                        background:'rgba(147,51,234,0.1)',
+                        color:'#7c2d12',
+                        fontSize:'12px',
+                        fontWeight:'500',
+                        cursor:'pointer',
+                        transition:'all 0.2s ease'
+                      }}
+                      title="View email analytics and insights"
+                      onMouseEnter={e => {
+                        e.target.style.transform = 'translateY(-1px)'
+                        e.target.style.boxShadow = '0 4px 8px rgba(147,51,234,0.2)'
+                      }}
+                      onMouseLeave={e => {
+                        e.target.style.transform = 'translateY(0)'
+                        e.target.style.boxShadow = 'none'
+                      }}
+                    >
+                      📊 Analytics
+                    </button>
                   </div>
                 </div>
               )}
@@ -1490,6 +1671,210 @@ All markdown features are now **fully functional** in AI responses! 🎉`
           >📝 test markdown</button>
         </div>
       </div>
+
+      {/* Phase 1 Modals */}
+      {showTemplateModal && (
+        <EmailTemplateModal
+          isOpen={showTemplateModal}
+          onClose={() => {
+            setShowTemplateModal(false)
+            setSelectedMessageForAction(null)
+          }}
+          messageData={selectedMessageForAction}
+          onTemplateSelect={async (template) => {
+            // Handle template selection and draft creation
+            try {
+              const base = window.location.hostname === 'localhost' ? 'http://localhost:4000' : ''
+              const response = await fetch(`${base}/api/phase1/templates/${template.id}/apply`, {
+                method: 'POST',
+                credentials: 'include',
+                headers: { 'Content-Type': 'application/json' },
+                body: JSON.stringify({
+                  messageId: selectedMessageForAction?.id,
+                  context: selectedMessageForAction
+                })
+              })
+
+              if (response.ok) {
+                const result = await response.json()
+                setMessages(m => [...m, {
+                  id: Date.now(),
+                  from: 'ai',
+                  text: `📝 **Template Applied Successfully**\n\nDraft created using "${template.name}" template:\n\n${result.draft_content}`
+                }])
+                setShowTemplateModal(false)
+                setSelectedMessageForAction(null)
+              } else {
+                throw new Error('Failed to apply template')
+              }
+            } catch (error) {
+              setMessages(m => [...m, {
+                id: Date.now(),
+                from: 'ai',
+                text: `❌ Error applying template: ${error.message}`
+              }])
+            }
+          }}
+        />
+      )}
+
+      {showSnoozeModal && (
+        <SnoozeModal
+          isOpen={showSnoozeModal}
+          onClose={() => {
+            setShowSnoozeModal(false)
+            setSelectedMessageForAction(null)
+          }}
+          messageData={selectedMessageForAction}
+          onSnooze={async (snoozeData) => {
+            try {
+              const base = window.location.hostname === 'localhost' ? 'http://localhost:4000' : ''
+              const response = await fetch(`${base}/api/phase1/snooze`, {
+                method: 'POST',
+                credentials: 'include',
+                headers: { 'Content-Type': 'application/json' },
+                body: JSON.stringify({
+                  messageId: selectedMessageForAction?.id,
+                  ...snoozeData
+                })
+              })
+
+              if (response.ok) {
+                const result = await response.json()
+                setMessages(m => [...m, {
+                  id: Date.now(),
+                  from: 'ai',
+                  text: `⏰ **Email Snoozed Successfully**\n\nEmail will reappear on ${new Date(result.snooze_until).toLocaleString()}`
+                }])
+                setShowSnoozeModal(false)
+                setSelectedMessageForAction(null)
+
+                // Refresh pending messages to reflect snooze status
+                window.dispatchEvent(new CustomEvent('refreshPendingMessages'))
+              } else {
+                throw new Error('Failed to snooze email')
+              }
+            } catch (error) {
+              setMessages(m => [...m, {
+                id: Date.now(),
+                from: 'ai',
+                text: `❌ Error snoozing email: ${error.message}`
+              }])
+            }
+          }}
+        />
+      )}
+
+      {showSearchBar && (
+        <EnhancedSearchBar
+          isOpen={showSearchBar}
+          onClose={() => {
+            setShowSearchBar(false)
+            setSearchResults([])
+          }}
+          onSearch={async (searchQuery) => {
+            try {
+              const base = window.location.hostname === 'localhost' ? 'http://localhost:4000' : ''
+              const response = await fetch(`${base}/api/phase1/search`, {
+                method: 'POST',
+                credentials: 'include',
+                headers: { 'Content-Type': 'application/json' },
+                body: JSON.stringify(searchQuery)
+              })
+
+              if (response.ok) {
+                const results = await response.json()
+                setSearchResults(results.messages || [])
+                
+                // Display search results in chat
+                if (results.messages && results.messages.length > 0) {
+                  const resultsText = `🔍 **Search Results** (${results.messages.length} found)\n\n` +
+                    results.messages.slice(0, 5).map(msg => 
+                      `📧 **${msg.subject}**\nFrom: ${msg.sender}\nDate: ${new Date(msg.received_at).toLocaleDateString()}\n---`
+                    ).join('\n\n')
+                  
+                  setMessages(m => [...m, {
+                    id: Date.now(),
+                    from: 'ai',
+                    text: resultsText
+                  }])
+                } else {
+                  setMessages(m => [...m, {
+                    id: Date.now(),
+                    from: 'ai',
+                    text: `🔍 No results found for your search query.`
+                  }])
+                }
+              } else {
+                throw new Error('Search failed')
+              }
+            } catch (error) {
+              setMessages(m => [...m, {
+                id: Date.now(),
+                from: 'ai',
+                text: `❌ Search error: ${error.message}`
+              }])
+            }
+          }}
+          searchResults={searchResults}
+        />
+      )}
+
+      {/* Phase 2 Modals */}
+      {showSchedulingModal && (
+        <EmailSchedulingModal
+          isOpen={showSchedulingModal}
+          onClose={() => {
+            setShowSchedulingModal(false)
+            setSelectedMessageForAction(null)
+          }}
+          messageData={selectedMessageForAction}
+          onSchedule={async (scheduleData) => {
+            try {
+              const base = window.location.hostname === 'localhost' ? 'http://localhost:4000' : ''
+              const response = await fetch(`${base}/api/phase2/schedule`, {
+                method: 'POST',
+                credentials: 'include',
+                headers: { 'Content-Type': 'application/json' },
+                body: JSON.stringify(scheduleData)
+              })
+
+              if (response.ok) {
+                const result = await response.json()
+                setMessages(m => [...m, {
+                  id: Date.now(),
+                  from: 'ai',
+                  text: `📅 **Email Scheduled Successfully**\n\nYour email to ${scheduleData.recipientEmail} will be sent on ${new Date(scheduleData.scheduledFor).toLocaleString()}\n\n**Subject:** ${scheduleData.subject}`
+                }])
+                setShowSchedulingModal(false)
+                setSelectedMessageForAction(null)
+              } else {
+                throw new Error('Failed to schedule email')
+              }
+            } catch (error) {
+              setMessages(m => [...m, {
+                id: Date.now(),
+                from: 'ai',
+                text: `❌ Error scheduling email: ${error.message}`
+              }])
+            }
+          }}
+        />
+      )}
+
+      {showNotificationPanel && (
+        <SmartNotificationPanel
+          isOpen={showNotificationPanel}
+          onClose={() => setShowNotificationPanel(false)}
+        />
+      )}
+
+      {showAnalyticsDashboard && (
+        <EmailAnalyticsDashboard
+          isOpen={showAnalyticsDashboard}
+          onClose={() => setShowAnalyticsDashboard(false)}
+        />
+      )}
     </main>
   )
 }

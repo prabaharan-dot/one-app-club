@@ -2,349 +2,323 @@
 
 ## Project Overview
 
-One App Club is a unified assistant platform that helps users manage emails, cross-platform messaging, and calendar events through AI-powered automation. The system integrates with Google services (Gmail, Calendar, Tasks) and provides intelligent action suggestions for email management.
+One App Club is a unified AI-powered assistant platform that manages emails, cross-platform messaging, and calendar events through intelligent automation. The system integrates with Google services (Gmail, Calendar, Tasks) and provides LLM-powered action suggestions for productivity management.
 
-**Core Mission**: "One TRUE assistant" for email prioritization, drafting, calendar management, and cross-platform messaging.
+**Core Mission**: "One TRUE assistant" that consolidates email prioritization, calendar management, task creation, and cross-platform messaging into a single intelligent interface.
 
 ## Architecture Overview
 
 ### Technology Stack
-- **Frontend**: React 18 + Vite, react-icons, date-fns
-- **Backend**: Node.js + Express
-- **Database**: PostgreSQL with pgvector extension
-- **Auth**: Google OAuth2 via googleapis
-- **AI**: OpenAI SDK with per-user API keys
-- **Deployment**: Designed for Azure (Container Apps, App Service, AKS)
+- **Frontend**: React 18 + Vite, ReactMarkdown, react-router-dom, react-icons, date-fns
+- **Backend**: Node.js + Express with session-based authentication
+- **Database**: PostgreSQL with pgvector extension for vector embeddings
+- **Auth**: Google OAuth2 via googleapis (Gmail, Calendar, Tasks scopes)
+- **AI**: OpenAI SDK with global server-side API keys
+- **Real-time**: Polling-based architecture with widget event system
 
 ### Project Structure
 ```
-├── client/                     # React frontend
-│   ├── src/
-│   │   ├── components/
-│   │   │   ├── widgets/       # Gmail, Slack, Teams, Jira, Github widgets
-│   │   │   ├── ChatWindow.jsx # Main chat interface with streaming
-│   │   │   ├── CalendarPane.jsx
-│   │   │   └── LLMKeyModal.jsx
-│   │   ├── App.jsx
-│   │   ├── api.js
-│   │   └── styles.css         # CSS variables, responsive design
-├── server/                     # Express backend
-│   ├── src/
-│   │   ├── integrations/google/ # Gmail polling and actions
-│   │   ├── llm/               # OpenAI client and processor
-│   │   ├── routes/            # API endpoints
-│   │   ├── services/          # Business logic layer
-│   │   └── migration.sql      # Database schema
-│   └── migrations/            # Structured migration files
+├── client/src/
+│   ├── components/
+│   │   ├── ChatWindow.jsx        # Main chat interface with streaming & lazy sessions
+│   │   ├── ConversationHistory.jsx # Modern card-based history with modal viewer
+│   │   ├── widgets/              # Gmail, Slack, Teams, Jira, Github widgets
+│   │   └── [NotificationPanel, PersonalizationPanel, etc.]
+│   ├── App.jsx                   # Router + authentication state management
+│   └── styles.css               # CSS custom properties, glass morphism, gradients
+├── server/src/
+│   ├── llm/
+│   │   ├── processor.js         # Modular LLM processing with context collectors
+│   │   ├── llmClient.js         # Global OpenAI API key management
+│   │   └── processors/          # Specialized processors by domain
+│   ├── integrations/google/     # Gmail polling, OAuth token management
+│   ├── routes/                  # API endpoints with consistent error handling
+│   └── migration.sql           # Complete database schema (consolidated)
 ```
 
-## Key Patterns & Conventions
+## Core Patterns & Conventions
 
-### 1. User-Scoped Data Model
-**CRITICAL**: The system is user-scoped (not tenant-based). All tables reference `user_id` directly.
-- Primary entity: `users` table with unique email
-- All data (messages, integrations, settings) belongs to specific users
-- Use `req.session.userId` for authorization in all endpoints
-
-### 2. Store-First Architecture
-**Email Processing Pattern**:
-1. **Store**: Upsert messages to `messages` table first
-2. **Process**: Run LLM analysis to generate suggested actions
-3. **Persist**: Store suggestions in `message_actions` table
-4. **Execute**: User manually approves and executes actions
-
+### 1. User-Scoped Architecture (NOT Tenant-Based)
+**CRITICAL**: Everything belongs to individual users, not tenants.
 ```sql
--- Core tables relationship
-users (id) 
-  ← messages (user_id)
-    ← message_actions (message_id, user_id)
-  ← integrations (user_id)
-  ← user_settings (user_id)
+-- Every table references user_id directly
+users (id) → messages (user_id) → message_actions (message_id, user_id)
+users (id) → integrations (user_id) → chat_sessions (user_id)
+```
+- Always use `req.session.userId` for authorization
+- All data operations are user-scoped
+- Unique constraints prevent duplicate data per user
+
+### 2. Store-First Email Processing
+**Pattern**: Store → Process → Suggest → Execute
+```js
+// 1. Gmail poller stores raw messages
+await upsertMessage(userId, 'gmail', messageId, metadata)
+
+// 2. LLM job processes stored messages
+const actions = await llmProcessor.processEmailActions(user, email)
+
+// 3. Store suggestions in message_actions table
+await db.query('INSERT INTO message_actions ...')
+
+// 4. User confirms and executes via /api/messages/:id/action
 ```
 
-### 3. Incremental Polling System
-Gmail polling uses `last_gmail_poll` in users table for incremental fetching:
+### 3. Lazy Session Management
+**Pattern**: Only create chat sessions when users actually send messages
 ```js
-// Check last poll time before fetching
-const userRes = await db.query('SELECT last_gmail_poll FROM users WHERE id = $1', [userId])
-const lastPoll = userRes.rows[0].last_gmail_poll
-// Use lastPoll to filter messages, then update timestamp
-```
-
-### 4. Action Execution Flow
-**Simple Actions** (immediate): `mark_read`, `delete`
-**Complex Actions** (LLM-assisted): `create_event`, `create_task`, `reply`, `forward`
-
-```js
-// Client pattern in ChatWindow.jsx
-if(actionType === 'mark_read' || actionType === 'delete'){
-  // Execute immediately via /api/messages/:id/action
-} else {
-  // First call /api/messages/:id/prepare for LLM suggestions
-  // Then present options to user for confirmation
+// ChatWindow.jsx - Don't create session until user sends first message
+async function send() {
+  let sessionId = currentSessionId
+  if (!sessionId) {
+    sessionId = await initializeSession() // Create session on first message
+  }
+  // Continue with message processing...
 }
 ```
 
-## Critical Integration Points
-
-### 1. Google OAuth & Token Management
-- Tokens stored as BYTEA in `integrations.oauth_token_encrypted`
-- Scopes: email, profile, gmail.readonly, gmail.send, calendar, tasks
-- Auth flow: `/api/auth/signup` → `/api/auth/oauth2callback`
-
-### 2. LLM Integration (OpenAI)
-- Per-user API keys stored in `user_settings.llm_key_encrypted`
-- Processor enforces strict JSON schema for actions
-- Models supported via user preference in `llm_model` field
-
+### 4. LLM Processing with Context History
+**Pattern**: Include conversation history for contextual responses
 ```js
-// LLM processor pattern
-const result = await llmProcessor.processEmail(user, email, {apiKey, model})
-const actions = result.actions || []
-// Actions: flag, create_task, create_event, reply, mark_read, set_priority
+// Automatic conversation history retrieval in /api/llm/intelligent
+const conversationHistory = await db.query(`
+  SELECT message_role, content FROM chat_messages
+  WHERE session_id = $1 AND context_relevant = TRUE
+  ORDER BY created_at DESC LIMIT 10
+`)
+// Format and include in LLM context
 ```
 
-### 3. Real-time Updates
-- Gmail widget polls `/api/messages/pending` every minute
-- Window events: `showPendingMessages` from widgets to ChatWindow
-- Chat streaming: artificial delays (400-500ms) for UX
+### 5. Two-Phase Action System
+**Simple Actions** (immediate): `mark_read`, `delete`
+**Complex Actions** (LLM-assisted): `create_event`, `create_meeting`, `draft_reply`
+```js
+// Frontend pattern in ChatWindow.jsx
+if(['mark_read', 'delete'].includes(actionType)) {
+  // Execute immediately
+  await performAction(messageId, actionType)
+} else {
+  // Prepare with LLM suggestions first
+  await prepareAction(messageId, actionType) // → Show confirmation UI
+}
+```
+
+## Critical Integrations & Data Flow
+
+### 1. Gmail Polling & Incremental Sync
+**Key Pattern**: Use `last_gmail_poll` timestamp for incremental fetching
+```js
+// poller.js - Incremental polling to avoid reprocessing
+const lastPoll = await getLastPollTime(userId)
+let query = 'is:unread'
+if(lastPoll) {
+  const afterDate = new Date(lastPoll).toISOString().split('T')[0].replace(/-/g,'/')
+  query += ` after:${afterDate}`
+}
+```
+
+### 2. OAuth Token Management
+**Storage**: Encrypted BYTEA in `integrations.oauth_token_encrypted`
+**Scopes Required**: email, profile, gmail.readonly, gmail.send, calendar, tasks
+```js
+// Authentication flow: /api/auth/signup → /api/auth/oauth2callback
+const oauth2Client = oauthClientFromTokens(row.oauth_token_encrypted.toString())
+```
+
+### 3. Global LLM Configuration
+**Pattern**: Server-side OpenAI API keys (not per-user)
+```js
+// llmClient.js - Global configuration
+const GLOBAL_OPENAI_KEY = process.env.OPENAI_API_KEY
+const GLOBAL_MODEL = process.env.OPENAI_MODEL || 'gpt-4o-mini'
+```
+
+### 4. Widget Event System
+**Pattern**: Widgets communicate with ChatWindow via custom events
+```js
+// Gmail widget dispatches events
+window.dispatchEvent(new CustomEvent('showPendingMessages'))
+
+// ChatWindow listens for widget interactions
+window.addEventListener('showPendingMessages', loadPendingMessages)
+```
 
 ## Database Schema Essentials
 
-### Key Tables
+### Core Tables & Relationships
 ```sql
--- Core user entity
-users (id, email, display_name, timezone, last_gmail_poll)
+-- User-centric model
+users (id, email, timezone, last_gmail_poll, personal_note)
+integrations (user_id, platform, oauth_token_encrypted)
+messages (user_id, external_message_id, action_required, actioned)
+message_actions (message_id, user_id, suggested_actions)
 
--- OAuth integrations per user
-integrations (user_id, platform, external_account_id, oauth_token_encrypted)
-
--- Email messages with action flags
-messages (user_id, platform, external_message_id, sender, subject, body_plain, 
-         action_required, actioned, received_at)
-
--- LLM-generated action suggestions
-message_actions (message_id, user_id, suggested_actions, created_at, acted)
-
--- Per-user LLM configuration
-user_settings (user_id, llm_key_encrypted, llm_model)
+-- Chat persistence with conversation history
+chat_sessions (user_id, title, created_at, updated_at)
+chat_messages (session_id, user_id, message_role, content, context_relevant)
 ```
 
-### Unique Constraints
+### Critical Unique Constraints
 ```sql
--- Prevent duplicate messages per user
-UNIQUE INDEX ON messages(platform, external_message_id, user_id)
+-- Prevent duplicate messages per user per platform
+UNIQUE(platform, external_message_id, user_id) ON messages
 
 -- One integration per platform per user
-UNIQUE INDEX ON integrations(user_id, platform, external_account_id)
+UNIQUE(user_id, platform, external_account_id) ON integrations
 ```
 
-## Frontend Patterns
+### Performance Indexes
+```sql
+-- Essential for email management performance
+idx_messages_user_recv ON messages(user_id, received_at DESC)
+idx_chat_messages_context ON chat_messages(session_id, context_relevant, created_at)
+```
 
-### 1. Chat Interface (`ChatWindow.jsx`)
-- **Streaming simulation**: Uses setTimeout delays for message appearance
-- **Keyboard shortcuts**: Alt+1/2/3 for suggestion buttons
-- **Action rendering**: Messages with `messageData` show action buttons
-- **Event handling**: Listens for `showPendingMessages` from widgets
+## Frontend Architecture Patterns
 
-### 2. Widget System (`components/widgets/`)
-- **Consistent structure**: icon-circle, title, description
-- **Data fetching**: Widgets call `/api/messages/pending` independently
-- **Accessibility**: All widgets have proper ARIA labels and keyboard support
+### 1. Modern Chat Interface (ChatWindow.jsx)
+- **Lazy session creation**: Don't hit DB until user sends message
+- **Streaming simulation**: setTimeout delays (400-500ms) for natural UX
+- **Action buttons**: Dynamic rendering based on `messageData.showActions`
+- **Keyboard shortcuts**: Alt+1/2/3 for quick email actions
 
-### 3. Responsive Design (`styles.css`)
-- **CSS Variables**: `--bg1`, `--bg2`, `--card`, `--muted`, `--accent`, `--glass`
-- **Grid Layout**: `grid-template-columns: 260px 1fr 360px`
-- **Mobile**: Collapses to single column, hides sidebars
+### 2. Card-Based Conversation History
+- **Modern design**: CSS gradients, glass morphism effects
+- **Modal viewing**: Click card → open conversation in modal
+- **Responsive grid**: Auto-fill columns with mobile breakpoints
 
-## API Patterns
+### 3. Widget System Architecture
+- **Consistent structure**: Icon circle + title + description
+- **Independent polling**: Each widget polls `/api/messages/pending` every 60s
+- **Event dispatch**: Widgets trigger ChatWindow actions via custom events
 
-### Authentication
+### 4. CSS Custom Properties System
+```css
+:root {
+  --bg1: linear-gradient(135deg, #667eea 0%, #764ba2 100%);
+  --glass: rgba(255, 255, 255, 0.1);
+  --card: rgba(255, 255, 255, 0.95);
+}
+```
+
+## API Design Patterns
+
+### Authentication & Authorization
 ```js
-// All protected routes check session
+// Consistent session validation across all routes
 if(!req.session.userId) return res.status(401).json({error:'not_logged_in'})
 const userId = req.session.userId
 ```
 
-### Error Handling
+### Error Handling with Permission Management
 ```js
-// Consistent error responses
-try {
-  // business logic
-} catch(e) {
-  console.error('operation_name error', e)
-  res.status(500).json({error: 'server_error'})
+function handlePermissionError(actionType, error) {
+  return {
+    error: 'insufficient_permissions',
+    actionType,
+    requiredPermission: permissionRequiredMap[actionType],
+    reauthUrl: '/api/auth/reauth'
+  }
 }
 ```
 
-### Message Endpoints
-- `GET /api/messages/pending` - Returns counts and actionable items
-- `POST /api/messages/:id/prepare` - LLM analysis for complex actions
-- `POST /api/messages/:id/action` - Execute approved actions
-
-## Development Guidelines
-
-### 1. Adding New Integrations
-1. Create service in `server/src/integrations/{platform}/`
-2. Add OAuth flow in `server/src/routes/auth.js`
-3. Update `integrations` table with new platform
-4. Create corresponding widget in `client/src/components/widgets/`
-
-### 2. Database Changes
-- Use structured migration files in `server/migrations/`
-- Always include `IF NOT EXISTS` for idempotent operations
-- Update `server/src/migration.sql` as master schema
-
-### 3. LLM Action Types
-When adding new action types to `llm/processor.js`:
-1. Update allowed types in system prompt
-2. Add execution logic in `/api/messages/:id/action` endpoint
-3. Handle in ChatWindow action buttons
-4. Test with various email scenarios
-
-### 4. UI Components
-- Follow existing CSS class patterns (`.widget`, `.chat-input`, `.fade-in`)
-- Include accessibility attributes (`role`, `tabIndex`, `aria-label`)
-- Add hover states and transitions for all interactive elements
-- Test responsive behavior on mobile breakpoints
-
-## Environment Setup
-
-### Required Environment Variables
-```bash
-# Server (.env)
-GOOGLE_CLIENT_ID=           # Google OAuth client ID
-GOOGLE_CLIENT_SECRET=       # Google OAuth client secret
-GOOGLE_REDIRECT=            # OAuth callback URL
-CLIENT_ORIGIN=              # Frontend URL for CORS
-SESSION_SECRET=             # Session encryption key
-DATABASE_URL=               # PostgreSQL connection string
-GOOGLE_POLL_INTERVAL=       # Polling frequency (default: 300000ms)
-
-# Client
-VITE_SERVER_URL=            # Backend URL (optional, auto-detected)
+### Conversation Context Retrieval
+```js
+// GET /api/chat/sessions/:id/context - Format for LLM consumption
+const conversationHistory = result.rows.reverse().map(msg => ({
+  role: msg.message_role === 'user' ? 'user' : 'assistant',
+  content: msg.content
+}))
 ```
 
-### Database Setup
-1. Install PostgreSQL with pgvector extension
-2. Run `server/src/migration.sql` for initial schema
-3. Run files in `server/migrations/` directory in order
+## Development Workflows
 
-## Performance Considerations
+### 1. Adding New Email Actions
+```js
+// 1. Update LLM processor with new action type
+const processors = {
+  'new_action': processNewAction
+}
+
+// 2. Add execution logic in routes/messages.js
+case 'new_action':
+  await executeNewAction(messageId, payload)
+
+// 3. Add UI button in ChatWindow action grid
+<button onClick={() => performAction(messageId, 'new_action')}>
+  🆕 New Action
+</button>
+```
+
+### 2. Database Migrations
+- **Master schema**: `server/src/migration.sql` (consolidated)
+- **Incremental changes**: Add to `server/migrations/` directory
+- **Idempotent patterns**: Always use `IF NOT EXISTS`
+
+### 3. LLM Processing Enhancement
+```js
+// Context collectors pattern in processor.js
+const contextCollectors = {
+  'email_summary': async (user, params) => {
+    const emails = await getEmailsForTimeframe(user.id, params.timeframe)
+    return { user, emails, type: 'email_batch' }
+  }
+}
+```
+
+## Testing & Debugging
+
+### Common Issues & Solutions
+1. **"not_logged_in" errors**: Check session middleware configuration
+2. **Gmail API failures**: Verify OAuth token validity and scopes
+3. **LLM parsing errors**: Use `extractJson()` helper for response parsing
+4. **Missing conversation history**: Check `context_relevant` flag in chat_messages
+
+### Debug Endpoints
+```bash
+GET /api/auth/me              # Check user session
+GET /api/messages/debug       # Email counts and sample data
+GET /api/llm/processing-status # LLM job status
+```
+
+### Database Debug Queries
+```sql
+-- Check user's email processing status
+SELECT COUNT(*), AVG(CASE WHEN llm_processed THEN 1 ELSE 0 END) as processed_ratio
+FROM messages WHERE user_id = 'user-uuid';
+
+-- Review conversation context
+SELECT message_role, content, context_relevant 
+FROM chat_messages WHERE session_id = 'session-uuid' 
+ORDER BY created_at DESC LIMIT 10;
+```
+
+## Performance & Scalability
 
 ### 1. Polling Optimization
-- Use `last_gmail_poll` timestamps to avoid reprocessing
-- Limit message fetching (default: 10 recent unread)
-- Consider implementing webhook alternatives for real-time updates
+- **Incremental sync**: Use `last_gmail_poll` timestamps
+- **Batch processing**: Limit to 50 messages per poll
+- **Separate jobs**: Gmail poller + LLM processor run independently
 
-### 2. LLM Usage
-- Cache frequent action patterns
-- Implement token usage tracking via `llm_calls` table
-- Use user-provided API keys to distribute costs
+### 2. LLM Cost Management
+- **Global API keys**: Server-side OpenAI configuration
+- **Context limiting**: Use last 10 messages for conversation history
+- **Caching**: Daily briefing cache with 2-hour TTL
 
-### 3. Database Indexing
-```sql
--- Critical indexes for performance
-idx_messages_user_recv ON messages(user_id, received_at DESC)
-idx_messages_unread ON messages(user_id) WHERE is_read = false
-idx_messages_action_required ON messages(user_id) WHERE action_required = true
-```
+### 3. Frontend Performance
+- **Lazy loading**: Chat sessions created on first user message
+- **Event-driven**: Widget updates via custom events, not polling
+- **CSS optimization**: Use transforms and opacity for animations
 
-## Security Practices
+## Security Considerations
 
-### 1. Token Storage
-- OAuth tokens stored as encrypted BYTEA (enhance with proper encryption)
-- LLM API keys stored per-user (not shared)
-- Session-based authentication (no JWT tokens in frontend)
+- **OAuth tokens**: Encrypted BYTEA storage (enhance with KMS in production)
+- **Session-based auth**: No JWT tokens in frontend
+- **User data isolation**: All queries filtered by `user_id`
+- **CORS configuration**: Restrict to specific client origins
 
-### 2. API Security
-- All endpoints validate `req.session.userId`
-- SQL queries use parameterized statements
-- CORS configured for specific client origin
+---
 
-### 3. Data Privacy
-- User-scoped data isolation
-- No cross-user data access
-- Audit logging for all message actions
+**Remember**: This is a user-centric system with conversation history, lazy session management, and intelligent email processing. Always maintain user context and leverage the modular LLM processing architecture for new features.
 
-## Testing Strategies
-
-### 1. Integration Testing
-- Test Google OAuth flow end-to-end
-- Verify email polling and LLM processing
-- Test action execution across all types
-
-### 2. Frontend Testing
-- Chat streaming and keyboard shortcuts
-- Widget data refresh cycles
-- Mobile responsive behavior
-
-### 3. Database Testing
-- Migration idempotency
-- Unique constraint enforcement
-- Index performance with realistic data volumes
-
-## Common Pitfalls & Solutions
-
-### 1. OAuth Token Expiry
-**Problem**: Tokens expire, breaking integrations
-**Solution**: Implement refresh token handling in poller error catching
-
-### 2. LLM Response Parsing
-**Problem**: Non-JSON responses break action processing
-**Solution**: Use `extractJson()` helper with fallback error handling
-
-### 3. Race Conditions in Polling
-**Problem**: Multiple poller instances processing same messages
-**Solution**: Use database-level locks or single poller instance
-
-### 4. Mobile UI Overflow
-**Problem**: Fixed sidebar widths break mobile layouts
-**Solution**: Use CSS Grid with responsive breakpoints, hide sidebars on mobile
-
-## Future Extension Points
-
-### 1. Multi-Platform Support
-- Slack, Microsoft Teams, Outlook integrations
-- Unified message interface across platforms
-- Cross-platform action coordination
-
-### 2. Advanced AI Features
-- Semantic search with message embeddings
-- Smart scheduling based on calendar analysis
-- Context-aware reply generation
-
-### 3. Real-time Capabilities
-- WebSocket connections for instant updates
-- Push notifications for urgent actions
-- Live collaboration features
-
-## Debugging Tips
-
-### 1. Common Issues
-- **"not_logged_in" errors**: Check session middleware and cookie settings
-- **Gmail API failures**: Verify OAuth scopes and token validity
-- **LLM parsing errors**: Check OpenAI API key and response format
-- **Missing messages**: Verify poller is running and `last_gmail_poll` updates
-
-### 2. Debug Endpoints
-- `GET /api/auth/me` - Check user session
-- `GET /api/messages/pending` - Verify message processing
-- `GET /api/settings/llm` - Check LLM key configuration
-
-### 3. Database Queries for Debugging
-```sql
--- Check user integrations
-SELECT * FROM integrations WHERE user_id = 'user-uuid';
-
--- Check unprocessed messages  
-SELECT * FROM messages WHERE user_id = 'user-uuid' AND action_required = true;
-
--- Check LLM action suggestions
-SELECT * FROM message_actions WHERE user_id = 'user-uuid' ORDER BY created_at DESC;
-```
-
-Remember: This is a user-centric system where every action, message, and integration belongs to a specific user. Always validate user context and maintain data isolation.
-
-# CRITICAL
-never modify env file, environment variables. dont execute any tests or commands.
+**CRITICAL**: Never modify environment variables or execute tests/commands directly.
