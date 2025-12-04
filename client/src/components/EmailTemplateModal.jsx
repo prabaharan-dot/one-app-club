@@ -1,5 +1,5 @@
 import React, { useState, useEffect } from 'react'
-import { MdTemplate, MdAdd, MdClose, MdEdit } from 'react-icons/md'
+import { MdEmail, MdAdd, MdClose, MdEdit } from 'react-icons/md'
 
 export default function EmailTemplateModal({ 
   isOpen, 
@@ -140,7 +140,7 @@ export default function EmailTemplateModal({
       <div className="modal-content template-modal" onClick={e => e.stopPropagation()}>
         <div className="modal-header">
           <h2>
-            <MdTemplate style={{ marginRight: '8px' }} />
+            <MdEmail style={{ marginRight: '8px' }} />
             Email Templates
           </h2>
           <button onClick={onClose} className="modal-close">
@@ -259,7 +259,7 @@ export default function EmailTemplateModal({
               <div className="loading">Loading templates...</div>
             ) : templates.length === 0 ? (
               <div className="empty-state">
-                <MdTemplate size={48} />
+                <MdEmail size={48} />
                 <p>No templates found</p>
                 <p>Create your first template to get started</p>
               </div>
