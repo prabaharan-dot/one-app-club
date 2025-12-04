@@ -5,6 +5,7 @@ const db = require('../db')
 // GET /api/chat/sessions - Get user's chat sessions
 router.get('/sessions', async (req, res) => {
   try {
+    console.log('📜 GET /api/chat/sessions - userId:', req.session?.userId)
     const userId = req.session && req.session.userId
     if (!userId) return res.status(401).json({ error: 'not_logged_in' })
 
@@ -63,6 +64,7 @@ router.post('/sessions', async (req, res) => {
 // GET /api/chat/sessions/:id - Get session with messages
 router.get('/sessions/:id', async (req, res) => {
   try {
+    console.log('📜 GET /api/chat/sessions/:id - sessionId:', req.params.id, 'userId:', req.session?.userId)
     const userId = req.session && req.session.userId
     if (!userId) return res.status(401).json({ error: 'not_logged_in' })
 

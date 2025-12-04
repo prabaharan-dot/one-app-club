@@ -427,8 +427,21 @@ router.post('/:id/action', async (req, res) => {
           console.log(`📅 Creating meeting for user ${req.user.email} (${req.user.timezone})`)
           
           // If user provided meeting details as text, try to parse or use defaults
-          let meetingTitle = payload.title || payload.summary || `Meeting with ${msg.sender}`
-          let meetingDescription = payload.description || payload.notes || `Meeting regarding: ${msg.subject || 'Email discussion'}`
+          // Include email details in meeting title and description
+          const emailSubject = msg.subject || 'Email discussion'
+          const emailSender = msg.sender || 'Unknown sender'
+          
+          // Create descriptive meeting title with email context
+          let meetingTitle = payload.title || payload.summary || 
+            (emailSubject.toLowerCase().includes('meeting') ? 
+              emailSubject : 
+              `Meeting: ${emailSubject}`)
+          let meetingDescription = payload.description || payload.notes || 
+            `📧 Meeting regarding email from ${emailSender}\n\n` +
+            `**Subject:** ${emailSubject}\n` +
+            `**From:** ${emailSender}\n` +
+            `**Received:** ${msg.received_at ? new Date(msg.received_at).toLocaleString() : 'Recently'}\n\n` +
+            `This meeting was scheduled in response to the above email.`
           
           // Use LLM to intelligently parse meeting requirements
           let userProvidedTime = false
@@ -446,14 +459,34 @@ router.post('/:id/action', async (req, res) => {
               
               if (llmKey.rows[0]?.llm_key_encrypted) {
                 const apiKey = llmKey.rows[0].llm_key_encrypted.toString() // Decrypt if needed
-                llmParsedMeeting = await llmProcessor.parseMeetingRequirements(req.user, userText, { apiKey })
+                
+                // Include email context for LLM processing
+                const emailContext = {
+                  subject: emailSubject,
+                  sender: emailSender,
+                  received_at: msg.received_at
+                }
+                
+                llmParsedMeeting = await llmProcessor.parseMeetingRequirements(req.user, userText, { 
+                  apiKey, 
+                  emailContext 
+                })
                 
                 if (llmParsedMeeting && llmParsedMeeting.success) {
                   console.log(`✅ LLM parsed meeting:`, llmParsedMeeting)
                   
-                  // Use LLM-parsed details
-                  if (llmParsedMeeting.title) meetingTitle = llmParsedMeeting.title
-                  if (llmParsedMeeting.description) meetingDescription = llmParsedMeeting.description
+                  // Use LLM-parsed details, but ensure email context is preserved
+                  if (llmParsedMeeting.title) {
+                    meetingTitle = llmParsedMeeting.title
+                  }
+                  if (llmParsedMeeting.description) {
+                    // Ensure email context is included in description even if LLM provided one
+                    meetingDescription = llmParsedMeeting.description + 
+                      `\n\n📧 **Email Context:**\n` +
+                      `**From:** ${emailSender}\n` +
+                      `**Subject:** ${emailSubject}\n` +
+                      `**Received:** ${msg.received_at ? new Date(msg.received_at).toLocaleString() : 'Recently'}`
+                  }
                   if (llmParsedMeeting.start_time) {
                     payload.start = llmParsedMeeting.start_time
                     payload.end = llmParsedMeeting.end_time || new Date(new Date(llmParsedMeeting.start_time).getTime() + (llmParsedMeeting.duration_minutes || 60) * 60 * 1000).toISOString()

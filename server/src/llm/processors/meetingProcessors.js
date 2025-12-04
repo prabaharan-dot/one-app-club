@@ -16,9 +16,11 @@ Current date/time: ${new Date().toISOString()}
 
 IMPORTANT: Only generate a meeting if the request contains SPECIFIC date and time information. If date/time is missing or vague, return: {"error": "missing_datetime"}
 
+CONVERSATION CONTEXT: Pay attention to the conversation history for meeting titles and details. If the current message only provides time/date but previous messages mentioned a specific meeting title, preserve that title.
+
 Required JSON format when date/time is present:
 {
-  "title": "meeting title",
+  "title": "meeting title (use specific title from conversation if mentioned, otherwise infer from context)",
   "description": "optional description", 
   "start_datetime": "ISO string (YYYY-MM-DDTHH:mm:ss)",
   "end_datetime": "ISO string (YYYY-MM-DDTHH:mm:ss)",
@@ -35,6 +37,11 @@ Output: {"title":"Meeting","start_datetime":"2025-11-24T09:00:00","end_datetime"
 Input: "book team standup friday 9am"
 Output: {"title":"Team standup","start_datetime":"2025-11-29T09:00:00","end_datetime":"2025-11-29T09:30:00"}
 
+Conversation Example:
+Previous: "create a meeting with title 'roadmap discussion 2026'"
+Current: "tomorrow 9am"
+Output: {"title":"roadmap discussion 2026","start_datetime":"2025-11-24T09:00:00","end_datetime":"2025-11-24T09:30:00"}
+
 Input: "schedule a meeting" (no time specified)
 Output: {"error": "missing_datetime"}
 
@@ -50,6 +57,7 @@ Rules:
 - Default duration: 30 minutes if not specified
 - Convert to ISO string format (YYYY-MM-DDTHH:mm:ss)
 - Return error JSON if date/time missing or vague
+- Preserve meeting titles from conversation context when available
 - Return ONLY the JSON object, no other text`;
 
   try {
@@ -172,23 +180,58 @@ function inferMeetingTitle(input, context) {
     return title.charAt(0).toUpperCase() + title.slice(1);
   }
 
-  // Try to infer from conversation history
+  // Try to infer from conversation history - enhanced logic for meeting titles
   if (context?.conversationHistory && context.conversationHistory.length > 0) {
-    const recentMessages = context.conversationHistory.slice(-5);
+    const recentMessages = context.conversationHistory.slice(-10); // Look at more recent messages
     
-    // Look for meeting-related topics in recent conversation
+    // Look for explicit meeting titles in conversation history
     for (const msg of recentMessages.reverse()) {
       if (msg.role === 'user' && msg.content) {
-        const content = msg.content.toLowerCase();
+        const content = msg.content;
         
-        // Look for project names, team names, or topics
-        const projectMatches = content.match(/\b(project|team|review|standup|sync|discussion|planning)\s+(\w+)/i);
+        // Look for explicit title patterns: "title 'xyz'" or "title \"xyz\"" or "titled xyz"
+        const explicitTitleMatch = content.match(/\btitle[d]?\s*['""]([^'""]+)['""]|\btitle[d]?\s+([^,.\n!?]+)/i);
+        if (explicitTitleMatch) {
+          const extractedTitle = (explicitTitleMatch[1] || explicitTitleMatch[2]).trim();
+          if (extractedTitle.length > 0 && extractedTitle.length <= 100) {
+            console.log('📋 Extracted explicit title from conversation:', extractedTitle);
+            return extractedTitle;
+          }
+        }
+        
+        // Look for meeting creation with quoted titles: "meeting 'title'" or 'meeting "title"'
+        const quotedTitleMatch = content.match(/\b(?:meeting|call|appointment|session)\s+['""]([^'""]+)['""]|\b['""]([^'""]+)['""]\s+(?:meeting|call|appointment|session)/i);
+        if (quotedTitleMatch) {
+          const extractedTitle = (quotedTitleMatch[1] || quotedTitleMatch[2]).trim();
+          if (extractedTitle.length > 0 && extractedTitle.length <= 100) {
+            console.log('📋 Extracted quoted title from conversation:', extractedTitle);
+            return extractedTitle;
+          }
+        }
+        
+        // Look for "create a meeting with title xyz" or "schedule abc meeting"
+        const withTitleMatch = content.match(/\b(?:create|schedule|book|set up)\s+(?:a\s+)?(?:meeting|call|appointment|session)\s+(?:with\s+title\s+|titled\s+|called\s+|for\s+)?['""]?([^'"",.!?\n]+)['""]?/i);
+        if (withTitleMatch) {
+          let extractedTitle = withTitleMatch[1].trim()
+            .replace(/\b(tomorrow|today|monday|tuesday|wednesday|thursday|friday|saturday|sunday|next\s+week|at|on)\b/gi, '')
+            .replace(/\b\d{1,2}(:\d{2})?\s?(am|pm)\b/gi, '')
+            .trim();
+          
+          if (extractedTitle.length > 2 && extractedTitle.length <= 100) {
+            console.log('📋 Extracted title from "with title" pattern:', extractedTitle);
+            return extractedTitle;
+          }
+        }
+        
+        // Look for project names, team names, or topics (existing logic)
+        const contentLower = content.toLowerCase();
+        const projectMatches = contentLower.match(/\b(project|team|review|standup|sync|discussion|planning)\s+(\w+)/i);
         if (projectMatches) {
           return `${projectMatches[1]} ${projectMatches[2]}`.replace(/^\w/, c => c.toUpperCase());
         }
         
-        // Look for "about" or "for" topics
-        const topicMatch = content.match(/\b(?:about|for|regarding|discuss)\s+([^.,!?]+)/i);
+        // Look for "about" or "for" topics (existing logic)
+        const topicMatch = contentLower.match(/\b(?:about|for|regarding|discuss)\s+([^.,!?]+)/i);
         if (topicMatch) {
           const topic = topicMatch[1].trim().substring(0, 50);
           if (topic.length > 3) {
@@ -199,6 +242,7 @@ function inferMeetingTitle(input, context) {
     }
   }
 
+  console.log('⚠️ No meeting title found in conversation history, using default');
   // Default title for ad-hoc requests
   return 'Meeting';
 }

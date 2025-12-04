@@ -1204,6 +1204,15 @@ For example: "Schedule team standup every Tuesday at 9am" or "Book client call t
 
 async function parseMeetingRequirements(user, meetingText, opts = {}) {
   const context = { user, meetingText, type: 'meeting_parsing' }
+  const { emailContext } = opts
+  
+  // Include email context in the system prompt if available
+  const emailContextText = emailContext ? 
+    `\nEMAIL CONTEXT (use this to enhance meeting details):
+- Subject: ${emailContext.subject}
+- From: ${emailContext.sender}
+- Received: ${emailContext.received_at ? new Date(emailContext.received_at).toLocaleString() : 'Recently'}
+- When creating meeting title/description, incorporate the email subject and sender name for context` : ''
   
   const sys = `You are an intelligent meeting scheduler that analyzes user input and extracts structured meeting information.
 
@@ -1212,7 +1221,7 @@ CRITICAL: You must respond with ONLY valid JSON. Do not include any explanations
 IMPORTANT TIMEZONE HANDLING:
 - User's timezone is: ${user.timezone || 'UTC'}
 - All times must be interpreted and calculated in the user's timezone
-- Return times in ISO 8601 format with proper timezone handling
+- Return times in ISO 8601 format with proper timezone handling${emailContextText}
 
 Parse the user's meeting request and return a JSON object with EXACTLY this structure:
 {

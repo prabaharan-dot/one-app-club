@@ -1,5 +1,6 @@
 import React, { useState, useRef, useEffect } from 'react'
 import ReactMarkdown from 'react-markdown'
+import { useNavigate } from 'react-router-dom'
 import { monitorOAuthPopup, openOAuthPopup } from '../utils/oauth'
 
 export default function ChatWindow(){
@@ -9,12 +10,17 @@ export default function ChatWindow(){
   const [currentSessionId, setCurrentSessionId] = useState(null)
   const [sessionLoading, setSessionLoading] = useState(true)
   const bodyRef = useRef()
+  const navigate = useNavigate()
 
   useEffect(()=>{ if(bodyRef.current) bodyRef.current.scrollTop = bodyRef.current.scrollHeight },[messages])
   
-  // Initialize session on component mount
+  // Check for auth-related URL parameters on component mount
   useEffect(() => {
-    initializeSession()
+    // Don't create session yet - wait for user's first message
+    setSessionLoading(false)
+    
+    // Show initial welcome message
+    setMessages([{id: 1, from: 'ai', text: 'Hi! I\'m your assistant. How can I help today?'}])
     
     // Check for auth-related URL parameters
     const urlParams = new URLSearchParams(window.location.search)
@@ -99,12 +105,14 @@ export default function ChatWindow(){
     }
   }, [])
   
-  // Initialize or load existing session
+  // Initialize session when user sends first message
   async function initializeSession() {
+    if (currentSessionId) return currentSessionId // Already initialized
+    
     try {
       const base = window.location.hostname === 'localhost' ? 'http://localhost:4000' : ''
       
-      // Create new session for now (in future, could load most recent session)
+      // Create new session
       const res = await fetch(`${base}/api/chat/sessions`, {
         method: 'POST',
         credentials: 'include',
@@ -118,16 +126,12 @@ export default function ChatWindow(){
       const sessionId = json.session.id
       
       setCurrentSessionId(sessionId)
-      
-      // Load session messages (includes initial message)
-      await loadSessionMessages(sessionId)
+      return sessionId
       
     } catch (err) {
       console.error('Session initialization failed:', err)
-      // Fallback to local-only mode
-      setMessages([{id: 1, from: 'ai', text: 'Hi! I\'m your assistant. How can I help today?'}])
-    } finally {
-      setSessionLoading(false)
+      // Return null to indicate local-only mode
+      return null
     }
   }
   
@@ -568,11 +572,19 @@ ${summaryData.summary_text || 'No additional insights available.'}`
   }
 
   async function send(){
-    if(!text.trim() || !currentSessionId) return
+    if(!text.trim()) return
+    
     const userMsg = {id:Date.now(),from:'user',text}
     const userText = text
     setMessages(m=>[...m,userMsg])
     setText('')
+    
+    // Initialize session if this is the first message
+    let sessionId = currentSessionId
+    if (!sessionId) {
+      sessionId = await initializeSession()
+      // If session creation failed, still continue with local-only mode
+    }
     
     // Check if this is a response to a meeting input request
     const lastMessage = messages[messages.length - 1]
@@ -581,8 +593,10 @@ ${summaryData.summary_text || 'No additional insights available.'}`
       return
     }
     
-    // Save user message to database
-    await saveMessage('user', userText, 'chat_response')
+    // Save user message to database (only if session exists)
+    if (sessionId) {
+      await saveMessage('user', userText, 'chat_response')
+    }
     
     try {
       // Show typing indicator
@@ -596,7 +610,7 @@ ${summaryData.summary_text || 'No additional insights available.'}`
         headers: {'Content-Type': 'application/json'},
         body: JSON.stringify({ 
           message: userText,
-          sessionId: currentSessionId
+          sessionId: sessionId
         })
       })
       
@@ -631,8 +645,15 @@ ${summaryData.summary_text || 'No additional insights available.'}`
           } else if (detectedType === 'daily_briefing') {
             summaryData = json.response
             aiResponse = json.response.response || json.response.summary || "Daily briefing processed"
+          } else if (detectedType === 'error') {
+            // Handle error responses properly - prioritize content field
+            aiResponse = json.response.content || json.response.message || json.response.text || "I had trouble processing your request. Could you try again with more details?"
+          } else if (detectedType === 'create_meeting') {
+            // Handle meeting creation responses - prioritize content field
+            aiResponse = json.response.content || json.response.message || json.response.text || "I'd be happy to help you create a meeting. Could you provide the date, time, and meeting details?"
           } else {
-            aiResponse = json.response.response || json.response.text || JSON.stringify(json.response)
+            // Extract meaningful text from structured responses, avoid JSON.stringify
+            aiResponse = json.response.content || json.response.message || json.response.response || json.response.text || "I processed your request."
           }
         } else if (json.response.response) {
           // Handle nested response object {type, response, timestamp}
@@ -760,6 +781,26 @@ ${summaryData.summary_text || aiResponse}${priorityText}${recommendationsText}${
         aiResponse = `🤖 *Detected: ${detectedType.replace('_', ' ')}*\n\n${aiResponse}`
       }
       
+      // Ensure aiResponse is user-friendly (not raw JSON)
+      const isJSON = (str) => {
+        try {
+          JSON.parse(str)
+          return str.startsWith('{') || str.startsWith('[')
+        } catch {
+          return false
+        }
+      }
+      
+      if (isJSON(aiResponse)) {
+        console.warn('Preventing raw JSON display:', aiResponse)
+        aiResponse = "I understand your request. Let me help you with that."
+        if (detectedType === 'create_meeting') {
+          aiResponse = "I'd be happy to help you create a meeting. Could you provide more specific details like the date, time, and meeting title?"
+        } else if (detectedType === 'error') {
+          aiResponse = "I had some trouble processing that request. Could you please try rephrasing or providing more details?"
+        }
+      }
+
       // Add AI response with slight delay for natural feel
       setTimeout(async ()=>{
         setMessages(m=>[...m,{
@@ -770,8 +811,10 @@ ${summaryData.summary_text || aiResponse}${priorityText}${recommendationsText}${
           data: summaryData
         }])
         
-        // Save AI response to database
-        await saveMessage('assistant', aiResponse, detectedType || 'chat_response', summaryData || {})
+        // Save AI response to database (only if session exists)
+        if (sessionId) {
+          await saveMessage('assistant', aiResponse, detectedType || 'chat_response', summaryData || {})
+        }
       }, 400)
       
     } catch(e) {
@@ -782,8 +825,10 @@ ${summaryData.summary_text || aiResponse}${priorityText}${recommendationsText}${
         const errorMsg = `Sorry, I encountered an error: ${e.message}. You can still use the suggestion buttons below for email management.`
         setMessages(m=>[...m,{id:Date.now(),from:'ai',text:errorMsg}])
         
-        // Save error message to database
-        await saveMessage('assistant', errorMsg, 'error_response', { error: e.message })
+        // Save error message to database (only if session exists)
+        if (sessionId) {
+          await saveMessage('assistant', errorMsg, 'error_response', { error: e.message })
+        }
       }, 400)
     }
   }
@@ -905,8 +950,37 @@ ${summaryData.summary_text || aiResponse}${priorityText}${recommendationsText}${
     <main className="chat-root">
       <div className="chat-card" role="region" aria-label="AI chat window">
         <div className="chat-header">
-          <div className="brand">One App Club <span className="small">assistant</span></div>
-          <div className="small">Minimal • Fast • Thoughtful</div>
+          <div>
+            <div className="brand">One App Club <span className="small">assistant</span></div>
+            <div className="small">Minimal • Fast • Thoughtful</div>
+          </div>
+          <button
+            onClick={() => navigate('/history')}
+            style={{
+              padding: '6px 12px',
+              borderRadius: '8px',
+              border: '1px solid rgba(0,0,0,0.1)',
+              background: 'rgba(255,255,255,0.8)',
+              cursor: 'pointer',
+              fontSize: '12px',
+              color: '#4f46e5',
+              display: 'flex',
+              alignItems: 'center',
+              gap: '6px',
+              transition: 'all 0.2s ease'
+            }}
+            onMouseEnter={e => {
+              e.target.style.background = 'rgba(59,130,246,0.1)'
+              e.target.style.borderColor = 'rgba(59,130,246,0.3)'
+            }}
+            onMouseLeave={e => {
+              e.target.style.background = 'rgba(255,255,255,0.8)'
+              e.target.style.borderColor = 'rgba(0,0,0,0.1)'
+            }}
+            title="View conversation history"
+          >
+            📜 History
+          </button>
         </div>
         <div className="chat-body" ref={bodyRef}>
           {sessionLoading ? (
